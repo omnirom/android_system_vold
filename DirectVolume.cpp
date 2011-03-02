@@ -210,7 +210,7 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
     SLOGD("DirectVolume::handlePartitionAdded -> MAJOR %d, MINOR %d, PARTN %d\n", major, minor, part_num);
 
     if (part_num > MAX_PARTITIONS || part_num < 1) {
-        SLOGE("Invalid 'PARTN' value");
+        SLOGE("Invalid 'PARTN' value. Override MAX_PARTITIONS to use more than %d partitions", MAX_PARTITIONS-1);
         return;
     }
 
@@ -233,7 +233,7 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
     SLOGD("Dv:partAdd: part_num = %d, minor = %d\n", part_num, minor);
 #endif
     if (part_num >= MAX_PARTITIONS) {
-        SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d)\n", part_num, MAX_PARTITIONS-1);
+        SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d) Override MAX_PARTITIONS to use these partitions\n", part_num, MAX_PARTITIONS-1);
     } else {
         mPartMinors[part_num -1] = minor;
     }
