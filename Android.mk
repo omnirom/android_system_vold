@@ -58,6 +58,10 @@ common_static_libraries := \
 
 include $(CLEAR_VARS)
 
+ifeq ($(BOARD_VOLD_EMMC_SHARES_DEV_MAJOR), true)
+LOCAL_CFLAGS += -DVOLD_EMMC_SHARES_DEV_MAJOR
+endif
+
 LOCAL_MODULE := libvold
 
 LOCAL_SRC_FILES := $(common_src_files)
@@ -83,6 +87,10 @@ LOCAL_SRC_FILES := \
 LOCAL_C_INCLUDES := $(common_c_includes)
 
 LOCAL_CFLAGS := -Werror=format
+
+ifeq ($(BOARD_VOLD_EMMC_SHARES_DEV_MAJOR), true)
+LOCAL_CFLAGS += -DVOLD_EMMC_SHARES_DEV_MAJOR
+endif
 
 LOCAL_SHARED_LIBRARIES := $(common_shared_libraries)
 

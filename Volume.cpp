@@ -294,6 +294,15 @@ int Volume::formatVol(bool wipe) {
 
     fstype = getFsType((const char*)devicePath);
 
+#ifdef VOLD_EMMC_SHARES_DEV_MAJOR
+    // If emmc and sdcard share dev major number, vold may pick
+    // incorrectly based on partition nodes alone, formatting
+    // the wrong device. Use device nodes instead.
+    dev_t deviceNodes;
+    getDeviceNodes((dev_t *) &deviceNodes, 1);
+    sprintf(devicePath, "/dev/block/vold/%d:%d", major(deviceNodes), minor(deviceNodes));
+#endif
+
     if (mDebug) {
         SLOGI("Formatting volume %s (%s) as %s", getLabel(), devicePath, fstype);
     }
