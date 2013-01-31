@@ -47,6 +47,7 @@
 #include "Volume.h"
 #include "VolumeManager.h"
 #include "ResponseCode.h"
+#include "Ext4.h"
 #include "Fat.h"
 #include "Process.h"
 #include "cryptfs.h"
@@ -249,6 +250,8 @@ int Volume::createDeviceNode(const char *path, int major, int minor) {
 
 int Volume::formatVol(bool wipe) {
 
+    char* fstype = NULL;
+
     if (getState() == Volume::State_NoMedia) {
         errno = ENODEV;
         return -1;
@@ -289,16 +292,23 @@ int Volume::formatVol(bool wipe) {
     sprintf(devicePath, "/dev/block/vold/%d:%d",
             major(partNode), minor(partNode));
 
+    fstype = getFsType((const char*)devicePath);
+
     if (mDebug) {
-        SLOGI("Formatting volume %s (%s)", getLabel(), devicePath);
+        SLOGI("Formatting volume %s (%s) as %s", getLabel(), devicePath, fstype);
+    }
+
+    if (strcmp(fstype, "ext4") == 0) {
+        ret = Ext4::format(devicePath, 0, NULL);
+    } else {
+        ret = Fat::format(devicePath, 0, wipe);
     }
 
     if (Fat::format(devicePath, 0, wipe)) {
         SLOGE("Failed to format (%s)", strerror(errno));
-        goto err;
     }
 
-    ret = 0;
+    free(fstype);
 
 err:
     setState(Volume::State_Idle);
@@ -462,6 +472,21 @@ int Volume::mountVol() {
                 if (Fat::doMount(devicePath, getMountpoint(), false, false, false,
                             AID_MEDIA_RW, AID_MEDIA_RW, 0007, true)) {
                     SLOGE("%s failed to mount via VFAT (%s)\n", devicePath, strerror(errno));
+                    continue;
+                }
+            } else if (strcmp(fstype, "ext4") == 0) {
+
+                if (Ext4::check(devicePath)) {
+                    errno = EIO;
+                    /* Badness - abort the mount */
+                    SLOGE("%s failed FS checks (%s)", devicePath, strerror(errno));
+                    setState(Volume::State_Idle);
+                    free(fstype);
+                    return -1;
+                }
+
+                if (Ext4::doMount(devicePath, getMountpoint(), false, false, false)) {
+                    SLOGE("%s failed to mount via EXT4 (%s)\n", devicePath, strerror(errno));
                     continue;
                 }
 
