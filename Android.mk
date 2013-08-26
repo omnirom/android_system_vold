@@ -16,6 +16,10 @@ ifeq ($(BOARD_VOLD_DISC_HAS_MULTIPLE_MAJORS), true)
 	common_cflags += -DVOLD_DISC_HAS_MULTIPLE_MAJORS
 endif
 
+ifneq ($(TARGET_EXTERNAL_APPS),)
+common_cflags += -DEXTERNAL_APPS_DEVICE_LABEL=\"$(TARGET_EXTERNAL_APPS)\"
+endif
+
 common_src_files := \
 	VolumeManager.cpp \
 	CommandListener.cpp \
