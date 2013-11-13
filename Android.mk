@@ -16,6 +16,10 @@ ifeq ($(BOARD_VOLD_DISC_HAS_MULTIPLE_MAJORS), true)
 	common_cflags += -DVOLD_DISC_HAS_MULTIPLE_MAJORS
 endif
 
+ifeq ($(BOARD_USES_MULTIPLE_SDCARD_FS), true)
+	common_cflags += -DBOARD_USES_MULTIPLE_SDCARD_FS
+endif
+
 common_src_files := \
 	VolumeManager.cpp \
 	CommandListener.cpp \
