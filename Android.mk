@@ -16,6 +16,10 @@ ifeq ($(BOARD_VOLD_DISC_HAS_MULTIPLE_MAJORS), true)
 	common_cflags += -DVOLD_DISC_HAS_MULTIPLE_MAJORS
 endif
 
+ifeq ($(BOARD_HAS_NON_EMULATED_SDCARD), true)
+	common_cflags += -DBOARD_HAS_NON_EMULATED_SDCARD
+endif
+
 common_src_files := \
 	VolumeManager.cpp \
 	CommandListener.cpp \
