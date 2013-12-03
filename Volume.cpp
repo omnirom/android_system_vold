@@ -47,6 +47,7 @@
 #include "ResponseCode.h"
 #include "Ext4.h"
 #include "Fat.h"
+#include "Exfat.h"
 #include "Process.h"
 #include "cryptfs.h"
 
@@ -456,6 +457,23 @@ int Volume::mountVol() {
 
                 if (Ext4::doMount(devicePath, getMountpoint(), false, false, false, true)) {
                     SLOGE("%s failed to mount via EXT4 (%s)\n", devicePath, strerror(errno));
+                    continue;
+                }
+
+           } else if (strcmp(fstype, "exfat") == 0) {
+
+                if (Exfat::check(devicePath)) {
+                    errno = EIO;
+                    /* Badness - abort the mount */
+                    SLOGE("%s failed FS checks (%s)", devicePath, strerror(errno));
+                    setState(Volume::State_Idle);
+                    free(fstype);
+                    return -1;
+                }
+
+                if (Exfat::doMount(devicePath, "/mnt/secure/staging", false, false, false,
+                        AID_SYSTEM, gid, 0702)) {
+                    SLOGE("%s failed to mount via EXFAT (%s)\n", devicePath, strerror(errno));
                     continue;
                 }
 
