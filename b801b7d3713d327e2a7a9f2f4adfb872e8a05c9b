@@ -16,6 +16,24 @@
       "revId": "b801b7d3713d327e2a7a9f2f4adfb872e8a05c9b",
       "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
       "unresolved": false
+    },
+    {
+      "key": {
+        "uuid": "6b8b61a3_263c1cbb",
+        "filename": "Volume.cpp",
+        "patchSetId": 6
+      },
+      "lineNbr": 481,
+      "author": {
+        "id": 1000117
+      },
+      "writtenOn": "2013-12-04T12:19:40Z",
+      "side": 1,
+      "message": "will replacing this line with\nif (Exfat::doMount(devicePath, getMountpoint(), false, false, false,\nbe enough ?",
+      "parentUuid": "6b8b61a3_a6474c56",
+      "revId": "b801b7d3713d327e2a7a9f2f4adfb872e8a05c9b",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
     }
   ]
 }
