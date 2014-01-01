@@ -248,7 +248,8 @@ int Volume::createDeviceNode(const char *path, int major, int minor) {
 }
 
 int Volume::formatVol(bool wipe) {
-
+    const char* fstype = NULL;
+    
     if (getState() == Volume::State_NoMedia) {
         errno = ENODEV;
         return -1;
@@ -301,8 +302,18 @@ int Volume::formatVol(bool wipe) {
     if (mDebug) {
         SLOGI("Formatting volume %s (%s)", getLabel(), devicePath);
     }
-
-    if (Fat::format(devicePath, 0, wipe)) {
+    
+    fstype = getFsType((const char*)devicePath);
+    if (fstype == NULL) {
+        // Default to vfat
+        fstype = "vfat";
+    }
+    
+    if (strcmp(fstype, "exfat") == 0) {
+        if (Exfat::format(devicePath)) {
+            SLOGE("Failed for format (%s) as exfat", strerror(errno));
+        }
+    } else if (Fat::format(devicePath, 0, wipe)) {
         SLOGE("Failed to format (%s)", strerror(errno));
         goto err;
     }
@@ -490,6 +501,14 @@ int Volume::mountVol() {
                     continue;
                 }
 
+<<<<<<< HEAD
+=======
+                if (Exfat::doMount(devicePath, getMountpoint(), false, false, false,
+                        AID_MEDIA_RW, AID_MEDIA_RW, 0007,true)) {
+                    SLOGE("%s failed to mount via EXFAT (%s)\n", devicePath, strerror(errno));
+                    continue;
+                }
+>>>>>>> 9e21553... [6/7] vold: exFAT Support
             } else {
                 errno = ENODATA;
                 // Unsupported filesystem
