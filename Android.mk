@@ -10,6 +10,7 @@ common_src_files := \
 	DirectVolume.cpp \
 	Process.cpp \
 	Ext4.cpp \
+	Exfat.cpp \
 	Fat.cpp \
 	Loop.cpp \
 	Devmapper.cpp \
