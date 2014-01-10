@@ -44,53 +44,39 @@
 
 static char EXFAT_FSCK[] = "/system/bin/fsck.exfat";
 static char EXFAT_MKFS[] = "/system/bin/mkfs.exfat";
-static char EXFAT_MOUNT[] = "/system/bin/mount.exfat";
+extern "C" int mount(const char *, const char *, const char *, unsigned long, const void *);
 
 int Exfat::doMount(const char *fsPath, const char *mountPoint,
                  bool ro, bool remount, bool executable,
-                 int ownerUid, int ownerGid, int permMask,bool sdcard) {
+                 int ownerUid, int ownerGid, int permMask, bool sdcard) {
 
     int rc = -1;
     char mountData[255];
-    const char *args[6];
-    int status;
-    if (access(EXFAT_MOUNT, X_OK)) {
-        SLOGE("Unable to mount, exFAT FUSE helper not found!");
-        return rc;
-    }
+    unsigned long flags;
+
+    flags = MS_NOATIME | MS_NODEV | MS_NOSUID | MS_DIRSYNC;
+
+    flags |= (executable ? 0 : MS_NOEXEC);
+    flags |= (ro ? MS_RDONLY : 0);
+    flags |= (remount ? MS_REMOUNT : 0);
+
     if (sdcard) {
         // Mount external volumes with forced sdcard_external context
         sprintf(mountData,
-            "context=u:object_r:sdcard_external:s0,noatime,nodev,nosuid,dirsync,uid=%d,gid=%d,fmask=%o,dmask=%o,%s,%s",
-            ownerUid, ownerGid, permMask, permMask,
-            (executable ? "exec" : "noexec"),
-            (ro ? "ro" : "rw"));
+            "context=u:object_r:sdcard_external:s0,uid=%d,gid=%d,fmask=%o,dmask=%o",
+            ownerUid, ownerGid, permMask, permMask);
     } else {
         sprintf(mountData,
-            "noatime,nodev,nosuid,dirsync,uid=%d,gid=%d,fmask=%o,dmask=%o,%s,%s",
-            ownerUid, ownerGid, permMask, permMask,
-            (executable ? "exec" : "noexec"),
-            (ro ? "ro" : "rw"));
+            "uid=%d,gid=%d,fmask=%o,dmask=%o",
+            ownerUid, ownerGid, permMask, permMask);
     }
 
-
-    args[0] = EXFAT_MOUNT;
-    args[1] = "-o";
-    args[2] = mountData;
-    args[3] = fsPath;
-    args[4] = mountPoint;
-    args[5] = NULL;
-
-    SLOGW("Executing exFAT mount (%s) -> (%s)", fsPath, mountPoint);
-
-    rc = android_fork_execvp(ARRAY_SIZE(args), (char **)args, &status, false,
-            true);
+    rc = mount(fsPath, mountPoint, "exfat", flags, mountData);
 
     if (rc && errno == EROFS) {
         SLOGE("%s appears to be a read only filesystem - retrying mount RO", fsPath);
-        strcat(mountData, ",ro");
-        rc = android_fork_execvp(ARRAY_SIZE(args), (char **)args, &status, false,
-            true);
+        flags |= MS_RDONLY;
+        rc = mount(fsPath, mountPoint, "exfat", flags, mountData);
     }
 
     return rc;
