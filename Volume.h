@@ -17,6 +17,7 @@
 #ifndef _VOLUME_H
 #define _VOLUME_H
 
+#ifdef __cplusplus
 #include <utils/List.h>
 #include <fs_mgr.h>
 
@@ -29,6 +30,7 @@ private:
     int mFlags;
 
 public:
+#endif
     static const int State_Init       = -1;
     static const int State_NoMedia    = 0;
     static const int State_Idle       = 1;
@@ -46,9 +48,9 @@ public:
     static const char *SEC_ASECDIR_INT;
     static const char *ASECDIR;
     static const char *LOOPDIR;
-    static const char *EXT4_FUSE_DIR;
     static const char *BLKID_PATH;
 
+#ifdef __cplusplus
 protected:
     char* mLabel;
     char* mUuid;
@@ -58,6 +60,7 @@ protected:
     int mPartIdx;
     int mOrigPartIdx;
     bool mRetryMount;
+    int mLunNumber;
 
     /*
      * The major/minor tuple of the currently mounted filesystem.
@@ -70,13 +73,16 @@ public:
 
     int mountVol();
     int unmountVol(bool force, bool revert);
-    int formatVol(bool wipe);
+    int formatVol(bool wipe, const char *fstype = NULL);
 
     const char* getLabel() { return mLabel; }
     const char* getUuid() { return mUuid; }
     const char* getUserLabel() { return mUserLabel; }
     int getState() { return mState; }
     int getFlags() { return mFlags; };
+
+    int getLunNumber() { return mLunNumber; }
+    void setLunNumber(int lunNumber) { mLunNumber = lunNumber; }
 
     /* Mountpoint of the raw volume */
     virtual const char *getMountpoint() = 0;
@@ -109,9 +115,16 @@ private:
     bool isMountpointMounted(const char *path);
     int mountAsecExternal();
     int doUnmount(const char *path, bool force);
+    int doFuseMount(const char *src, const char *dst);
     int extractMetadata(const char* devicePath);
 };
 
 typedef android::List<Volume *> VolumeCollection;
 
+extern "C" {
+#endif
+    const char *stateToStr(int state);
+#ifdef __cplusplus
+};
+#endif
 #endif

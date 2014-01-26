@@ -30,7 +30,6 @@ typedef android::List<char *> PathCollection;
 class DirectVolume : public Volume {
 public:
     static const int MAX_PARTITIONS = VOLD_MAX_PARTITIONS;
-
 protected:
     const char* mMountpoint;
     const char* mFuseMountpoint;

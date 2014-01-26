@@ -19,6 +19,10 @@
 
 #include <sys/cdefs.h>
 
+#ifndef HELPER_PATH
+#define HELPER_PATH "/system/bin/"
+#endif
+
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(*(a)))
 
 __BEGIN_DECLS

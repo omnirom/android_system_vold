@@ -83,7 +83,7 @@ public:
     int shareVolume(const char *label, const char *method);
     int unshareVolume(const char *label, const char *method);
     int shareEnabled(const char *path, const char *method, bool *enabled);
-    int formatVolume(const char *label, bool wipe);
+    int formatVolume(const char *label, bool wipe, const char *fstype = NULL);
     void disableVolumeManager(void) { mVolManagerDisabled = 1; }
 
     /* ASEC */
@@ -154,6 +154,7 @@ private:
     void readInitialState();
     bool isMountpointMounted(const char *mp);
     bool isAsecInDirectory(const char *dir, const char *asec) const;
+    int openLun(int number);
 };
 
 extern "C" {

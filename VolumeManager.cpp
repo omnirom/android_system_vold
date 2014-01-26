@@ -34,6 +34,7 @@
 
 #include <cutils/fs.h>
 #include <cutils/log.h>
+#include <cutils/properties.h>
 
 #include <sysutils/NetlinkEvent.h>
 
@@ -50,8 +51,6 @@
 #include "Asec.h"
 #include "cryptfs.h"
 
-#define MASS_STORAGE_FILE_PATH  "/sys/class/android_usb/android0/f_mass_storage/lun/file"
-
 VolumeManager *VolumeManager::sInstance = NULL;
 
 VolumeManager *VolumeManager::Instance() {
@@ -67,9 +66,12 @@ VolumeManager::VolumeManager() {
     mBroadcaster = NULL;
     mUmsSharingCount = 0;
     mSavedDirtyRatio = -1;
-    // set dirty ratio to 0 when UMS is active
-    mUmsDirtyRatio = 0;
     mVolManagerDisabled = 0;
+
+    // set dirty ratio to ro.vold.umsdirtyratio (default 0) when UMS is active
+    char dirtyratio[PROPERTY_VALUE_MAX];
+    property_get("ro.vold.umsdirtyratio", dirtyratio, "0");
+    mUmsDirtyRatio = atoi(dirtyratio);
 }
 
 VolumeManager::~VolumeManager() {
@@ -126,12 +128,15 @@ int VolumeManager::stop() {
 }
 
 int VolumeManager::addVolume(Volume *v) {
+    v->setLunNumber(mVolumes->size());
     mVolumes->push_back(v);
     return 0;
 }
 
 void VolumeManager::handleBlockEvent(NetlinkEvent *evt) {
+#ifdef NETLINK_DEBUG
     const char *devpath = evt->findParam("DEVPATH");
+#endif
 
     /* Lookup a volume to handle this device */
     VolumeCollection::iterator it;
@@ -168,7 +173,7 @@ int VolumeManager::listVolumes(SocketClient *cli) {
     return 0;
 }
 
-int VolumeManager::formatVolume(const char *label, bool wipe) {
+int VolumeManager::formatVolume(const char *label, bool wipe, const char *fstype) {
     Volume *v = lookupVolume(label);
 
     if (!v) {
@@ -181,7 +186,7 @@ int VolumeManager::formatVolume(const char *label, bool wipe) {
         return -1;
     }
 
-    return v->formatVol(wipe);
+    return v->formatVol(wipe, fstype);
 }
 
 int VolumeManager::getObbMountPath(const char *sourceFile, char *mountPath, int mountPathLen) {
@@ -885,8 +890,6 @@ bool VolumeManager::isAsecInDirectory(const char *dir, const char *asecName) con
 
 int VolumeManager::findAsec(const char *id, char *asecPath, size_t asecPathLen,
         const char **directory) const {
-    int dirfd, fd;
-    const int idLen = strlen(id);
     char *asecName;
 
     if (asprintf(&asecName, "%s.asec", id) < 0) {
@@ -932,7 +935,7 @@ int VolumeManager::mountAsec(const char *id, const char *key, int ownerUid) {
 
     int written = snprintf(mountPoint, sizeof(mountPoint), "%s/%s", Volume::ASECDIR, id);
     if ((written < 0) || (size_t(written) >= sizeof(mountPoint))) {
-        SLOGE("ASEC mount failed: couldn't construct mountpoint", id);
+        SLOGE("ASEC mount failed: couldn't construct mountpoint %s", id);
         return -1;
     }
 
@@ -965,7 +968,6 @@ int VolumeManager::mountAsec(const char *id, const char *key, int ownerUid) {
 
     char dmDevice[255];
     bool cleanupDm = false;
-    int fd;
     unsigned int nr_sec = 0;
     struct asec_superblock sb;
 
@@ -1079,7 +1081,7 @@ int VolumeManager::mountObb(const char *img, const char *key, int ownerGid) {
 
     int written = snprintf(mountPoint, sizeof(mountPoint), "%s/%s", Volume::LOOPDIR, idHash);
     if ((written < 0) || (size_t(written) >= sizeof(mountPoint))) {
-        SLOGE("OBB mount failed: couldn't construct mountpoint", img);
+        SLOGE("OBB mount failed: couldn't construct mountpoint %s", img);
         return -1;
     }
 
@@ -1250,6 +1252,36 @@ int VolumeManager::shareEnabled(const char *label, const char *method, bool *ena
     return 0;
 }
 
+static const char *LUN_FILES[] = {
+#ifdef CUSTOM_LUN_FILE
+    CUSTOM_LUN_FILE,
+#endif
+    /* Only andriod0 exists, but the %d in there is a hack to satisfy the
+       format string and also give a not found error when %d > 0 */
+    "/sys/class/android_usb/android%d/f_mass_storage/lun/file",
+    NULL
+};
+
+int VolumeManager::openLun(int number) {
+    const char **iterator = LUN_FILES;
+    char qualified_lun[255];
+    while (*iterator) {
+        bzero(qualified_lun, 255);
+        snprintf(qualified_lun, 254, *iterator, number);
+        int fd = open(qualified_lun, O_WRONLY);
+        if (fd >= 0) {
+            SLOGD("Opened lunfile %s", qualified_lun);
+            return fd;
+        }
+        SLOGE("Unable to open ums lunfile %s (%s)", qualified_lun, strerror(errno));
+        iterator++;
+    }
+
+    errno = EINVAL;
+    SLOGE("Unable to find ums lunfile for LUN %d", number);
+    return -1;
+}
+
 int VolumeManager::shareVolume(const char *label, const char *method) {
     Volume *v = lookupVolume(label);
 
@@ -1313,8 +1345,7 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
         return -1;
     }
 
-    if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
-        SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
+    if ((fd = openLun(v->getLunNumber())) < 0) {
         return -1;
     }
 
@@ -1363,8 +1394,7 @@ int VolumeManager::unshareVolume(const char *label, const char *method) {
     }
 
     int fd;
-    if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
-        SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
+    if ((fd = openLun(v->getLunNumber())) < 0) {
         return -1;
     }
 
@@ -1562,6 +1592,11 @@ bool VolumeManager::isMountpointMounted(const char *mp)
 }
 
 int VolumeManager::cleanupAsec(Volume *v, bool force) {
+    // Only primary storage needs ASEC cleanup
+    if (!(v->getFlags() & VOL_PROVIDES_ASEC)) {
+        return 0;
+    }
+
     int rc = 0;
 
     char asecFileName[255];
@@ -1617,12 +1652,9 @@ int VolumeManager::cleanupAsec(Volume *v, bool force) {
 int VolumeManager::mkdirs(char* path) {
     // Require that path lives under a volume we manage
     const char* emulated_source = getenv("EMULATED_STORAGE_SOURCE");
-    const char* external_storage = getenv("EXTERNAL_STORAGE");
     const char* root = NULL;
     if (emulated_source && !strncmp(path, emulated_source, strlen(emulated_source))) {
         root = emulated_source;
-    } else if (external_storage && !strncmp(path, external_storage, strlen(external_storage))){
-        root = external_storage;
     } else {
         Volume* vol = getVolumeForFile(path);
         if (vol) {

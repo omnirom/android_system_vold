@@ -34,11 +34,14 @@
 #include "VolumeManager.h"
 #include "ResponseCode.h"
 #include "Process.h"
-#include "Xwarp.h"
 #include "Loop.h"
 #include "Devmapper.h"
 #include "cryptfs.h"
+
+#ifndef MINIVOLD
 #include "fstrim.h"
+#include "Xwarp.h"
+#endif
 
 #define DUMP_ARGS 0
 
@@ -46,12 +49,15 @@ CommandListener::CommandListener() :
                  FrameworkListener("vold", true) {
     registerCmd(new DumpCmd());
     registerCmd(new VolumeCmd());
+    registerCmd(new StorageCmd());
+    registerCmd(new CryptfsCmd());
+
+#ifndef MINIVOLD
     registerCmd(new AsecCmd());
     registerCmd(new ObbCmd());
-    registerCmd(new StorageCmd());
     registerCmd(new XwarpCmd());
-    registerCmd(new CryptfsCmd());
     registerCmd(new FstrimCmd());
+#endif
 }
 
 void CommandListener::dumpArgs(int argc, char **argv, int argObscure) {
@@ -162,16 +168,20 @@ int CommandListener::VolumeCmd::runCommand(SocketClient *cli,
         }
         rc = vm->unmountVolume(argv[2], force, revert);
     } else if (!strcmp(argv[1], "format")) {
-        if (argc < 3 || argc > 4 ||
-            (argc == 4 && strcmp(argv[3], "wipe"))) {
-            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: volume format <path> [wipe]", false);
+        if (argc < 3 || argc > 5 ||
+            (argc == 5 && strcmp(argv[4], "wipe") != 0)) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: volume format <path> [fstype] [wipe]", false);
             return 0;
         }
         bool wipe = false;
-        if (argc >= 4 && !strcmp(argv[3], "wipe")) {
+        if (strcmp(argv[argc - 1], "wipe") == 0) {
             wipe = true;
         }
-        rc = vm->formatVolume(argv[2], wipe);
+        if (argc == 3 || (argc == 4 && wipe)) {
+            rc = vm->formatVolume(argv[2], wipe);
+        } else {
+            rc = vm->formatVolume(argv[2], wipe, argv[3]);
+        }
     } else if (!strcmp(argv[1], "share")) {
         if (argc != 4) {
             cli->sendMsg(ResponseCode::CommandSyntaxError,
@@ -215,7 +225,6 @@ int CommandListener::VolumeCmd::runCommand(SocketClient *cli,
     if (!rc) {
         cli->sendMsg(ResponseCode::CommandOkay, "volume operation succeeded", false);
     } else {
-        int erno = errno;
         rc = ResponseCode::convertFromErrno();
         cli->sendMsg(rc, "volume operation failed", true);
     }
@@ -274,6 +283,7 @@ int CommandListener::StorageCmd::runCommand(SocketClient *cli,
     return 0;
 }
 
+#ifndef MINIVOLD
 CommandListener::AsecCmd::AsecCmd() :
                  VoldCommand("asec") {
 }
@@ -548,6 +558,7 @@ int CommandListener::XwarpCmd::runCommand(SocketClient *cli,
 
     return 0;
 }
+#endif
 
 CommandListener::CryptfsCmd::CryptfsCmd() :
                  VoldCommand("cryptfs") {
@@ -642,6 +653,7 @@ int CommandListener::CryptfsCmd::runCommand(SocketClient *cli,
     return 0;
 }
 
+#ifndef MINIVOLD
 CommandListener::FstrimCmd::FstrimCmd() :
                  VoldCommand("fstrim") {
 }
@@ -679,3 +691,4 @@ int CommandListener::FstrimCmd::runCommand(SocketClient *cli,
 
     return 0;
 }
+#endif
