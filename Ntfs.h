@@ -1,5 +1,6 @@
 /*
- * Copyright (C) 2012 The Android Open Source Project
+ * Copyright (C) 2008 The Android Open Source Project
+ * Copyright (C) 2012 Freescale Semiconductor, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,19 +15,19 @@
  * limitations under the License.
  */
 
-#ifndef _VOLDUTIL_H
-#define _VOLDUTIL_H
+#ifndef _NTFS_H
+#define _NTFS_H
 
-#include <sys/cdefs.h>
+#include <unistd.h>
 
-#ifndef HELPER_PATH
-#define HELPER_PATH "/system/bin/"
-#endif
-
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof(*(a)))
-
-__BEGIN_DECLS
-  unsigned int get_blkdev_size(int fd);
-__END_DECLS
+class Ntfs {
+public:
+    static int check(const char *fsPath);
+    static int doMount(const char *fsPath, const char *mountPoint,
+                       bool ro, bool remount, bool executable,
+                       int ownerUid, int ownerGid, int permMask,
+                       bool createLost);
+    static int format(const char *fsPath, bool wipe);
+};
 
 #endif
