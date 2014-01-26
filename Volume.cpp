@@ -50,8 +50,10 @@
 #include "Ext4.h"
 #include "Fat.h"
 #include "Exfat.h"
+#include "Ntfs.h"
 #include "Process.h"
 #include "cryptfs.h"
+#include "VoldUtil.h"
 
 extern "C" void dos_partition_dec(void const *pp, struct dos_partition *d);
 extern "C" void dos_partition_enc(void *pp, struct dos_partition *d);
@@ -312,11 +314,13 @@ int Volume::formatVol(bool wipe) {
         ret = Ext4::format(devicePath, 0, NULL);
     } else if (strcmp(fstype, "exfat") == 0) {
         ret = Exfat::format(devicePath);
+    } else if (strcmp(fstype, "ntfs") == 0) {
+        ret = Ntfs::format(devicePath, wipe);
     } else {
         ret = Fat::format(devicePath, 0, wipe);
     }
 
-    if (Fat::format(devicePath, 0, wipe)) {
+    if (ret < 0) {
         SLOGE("Failed to format (%s)", strerror(errno));
     }
 
@@ -499,6 +503,13 @@ int Volume::mountVol() {
 
                 if (Ext4::doMount(devicePath, getMountpoint(), false, false, false)) {
                     SLOGE("%s failed to mount via EXT4 (%s)\n", devicePath, strerror(errno));
+                    continue;
+                }
+            } else if (strcmp(fstype, "ntfs") == 0) {
+
+                if (Ntfs::doMount(devicePath, getMountpoint(), false, false, false,
+                            AID_MEDIA_RW, AID_MEDIA_RW, 0007, true)) {
+                    SLOGE("%s failed to mount via NTFS (%s)\n", devicePath, strerror(errno));
                     continue;
                 }
 
