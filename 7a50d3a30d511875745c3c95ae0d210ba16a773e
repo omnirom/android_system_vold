@@ -1,0 +1,72 @@
+{
+  "comments": [
+    {
+      "key": {
+        "uuid": "ab62b9bd_d927c6b0",
+        "filename": "DirectVolume.cpp",
+        "patchSetId": 1
+      },
+      "lineNbr": 213,
+      "author": {
+        "id": 1000170
+      },
+      "writtenOn": "2014-02-02T01:25:40Z",
+      "side": 0,
+      "message": "These are reverting changes that were previously made to make troubleshooting easier.",
+      "revId": "7a50d3a30d511875745c3c95ae0d210ba16a773e",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    },
+    {
+      "key": {
+        "uuid": "ab62b9bd_f91c8a6b",
+        "filename": "DirectVolume.cpp",
+        "patchSetId": 1
+      },
+      "lineNbr": 236,
+      "author": {
+        "id": 1000170
+      },
+      "writtenOn": "2014-02-02T01:25:40Z",
+      "side": 0,
+      "message": "Same as above",
+      "revId": "7a50d3a30d511875745c3c95ae0d210ba16a773e",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    },
+    {
+      "key": {
+        "uuid": "ab62b9bd_19221ea1",
+        "filename": "VolumeManager.cpp",
+        "patchSetId": 1
+      },
+      "lineNbr": 1317,
+      "author": {
+        "id": 1000170
+      },
+      "writtenOn": "2014-02-02T01:25:40Z",
+      "side": 0,
+      "message": "Do this and the error below get replaced anywhere?",
+      "revId": "7a50d3a30d511875745c3c95ae0d210ba16a773e",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    },
+    {
+      "key": {
+        "uuid": "ab62b9bd_3937e2e2",
+        "filename": "VolumeManager.cpp",
+        "patchSetId": 1
+      },
+      "lineNbr": 1620,
+      "author": {
+        "id": 1000170
+      },
+      "writtenOn": "2014-02-02T01:25:40Z",
+      "side": 0,
+      "message": "If this is for supporting internal storage is it necessary to remove this for external/sdcards? Or more importantly, will this also support all the devices with external storage as well?",
+      "revId": "7a50d3a30d511875745c3c95ae0d210ba16a773e",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    }
+  ]
+}
