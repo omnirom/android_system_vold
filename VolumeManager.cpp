@@ -34,6 +34,7 @@
 
 #include <cutils/fs.h>
 #include <cutils/log.h>
+#include <cutils/properties.h>
 
 #include <sysutils/NetlinkEvent.h>
 
@@ -49,8 +50,6 @@
 #include "Process.h"
 #include "Asec.h"
 #include "cryptfs.h"
-
-#define MASS_STORAGE_FILE_PATH  "/sys/class/android_usb/android0/f_mass_storage/lun/file"
 
 VolumeManager *VolumeManager::sInstance = NULL;
 
@@ -126,6 +125,7 @@ int VolumeManager::stop() {
 }
 
 int VolumeManager::addVolume(Volume *v) {
+    v->setLunNumber(mVolumes->size());
     mVolumes->push_back(v);
     return 0;
 }
@@ -1250,6 +1250,39 @@ int VolumeManager::shareEnabled(const char *label, const char *method, bool *ena
     return 0;
 }
 
+static const char *LUN_FILES[] = {
+#ifdef CUSTOM_LUN_FILE
+    CUSTOM_LUN_FILE,
+#endif
+    /* Only andriod0 exists, but the %d in there is a hack to satisfy the
+       format string and also give a not found error when %d > 0 */
+    "/sys/devices/platform/msm_hsusb/gadget/lun0/file",
+    "/sys/class/android_usb/android0/f_mass_storage/lun0/file",
+    "/sys/class/android_usb/android%d/f_mass_storage/lun/file",
+    "/sys/devices/virtual/android_usb/android0/f_mass_storage/lun",
+    NULL
+};
+
+int VolumeManager::openLun(int number) {
+    const char **iterator = LUN_FILES;
+    char qualified_lun[255];
+    while (*iterator) {
+        bzero(qualified_lun, 255);
+        snprintf(qualified_lun, 254, *iterator, number);
+        int fd = open(qualified_lun, O_WRONLY);
+        if (fd >= 0) {
+            SLOGD("Opened lunfile %s", qualified_lun);
+            return fd;
+        }
+        SLOGE("Unable to open ums lunfile %s (%s)", qualified_lun, strerror(errno));
+        iterator++;
+    }
+
+    errno = EINVAL;
+    SLOGE("Unable to find ums lunfile for LUN %d", number);
+    return -1;
+}
+
 int VolumeManager::shareVolume(const char *label, const char *method) {
     Volume *v = lookupVolume(label);
 
@@ -1313,8 +1346,7 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
         return -1;
     }
 
-    if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
-        SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
+    if ((fd = openLun(v->getLunNumber())) < 0) {
         return -1;
     }
 
@@ -1363,8 +1395,7 @@ int VolumeManager::unshareVolume(const char *label, const char *method) {
     }
 
     int fd;
-    if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
-        SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
+    if ((fd = openLun(v->getLunNumber())) < 0) {
         return -1;
     }
 
@@ -1436,7 +1467,8 @@ int VolumeManager::getDirectVolumeList(struct volume_info *vol_list) {
     return 0;
 }
 
-int VolumeManager::unmountVolume(const char *label, bool force, bool revert) {
+int VolumeManager::unmountVolume(const char *label, bool force, bool revert)
+{
     Volume *v = lookupVolume(label);
 
     if (!v) {
@@ -1561,13 +1593,18 @@ bool VolumeManager::isMountpointMounted(const char *mp)
     return false;
 }
 
-int VolumeManager::cleanupAsec(Volume *v, bool force) {
+int VolumeManager::cleanupAsec(Volume *v, bool force){
     int rc = 0;
 
     char asecFileName[255];
 
     AsecIdCollection removeAsec;
     AsecIdCollection removeObb;
+
+    // Only primary storage needs ASEC cleanup
+    if (!(v->getFlags() & VOL_PROVIDES_ASEC)) {
+        return 0;
+    }
 
     for (AsecIdCollection::iterator it = mActiveContainers->begin(); it != mActiveContainers->end();
             ++it) {
