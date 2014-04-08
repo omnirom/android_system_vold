@@ -50,8 +50,6 @@
 #include "Asec.h"
 #include "cryptfs.h"
 
-#define MASS_STORAGE_FILE_PATH  "/sys/class/android_usb/android0/f_mass_storage/lun/file"
-
 VolumeManager *VolumeManager::sInstance = NULL;
 
 VolumeManager *VolumeManager::Instance() {
@@ -1313,7 +1311,7 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
         return -1;
     }
 
-    if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
+     if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
         SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
         return -1;
     }
@@ -1436,7 +1434,8 @@ int VolumeManager::getDirectVolumeList(struct volume_info *vol_list) {
     return 0;
 }
 
-int VolumeManager::unmountVolume(const char *label, bool force, bool revert) {
+int VolumeManager::unmountVolume(const char *label, bool force, bool revert)
+{
     Volume *v = lookupVolume(label);
 
     if (!v) {
@@ -1561,13 +1560,18 @@ bool VolumeManager::isMountpointMounted(const char *mp)
     return false;
 }
 
-int VolumeManager::cleanupAsec(Volume *v, bool force) {
+int VolumeManager::cleanupAsec(Volume *v, bool force){
     int rc = 0;
 
     char asecFileName[255];
 
     AsecIdCollection removeAsec;
     AsecIdCollection removeObb;
+
+    // Only primary storage needs ASEC cleanup
+    if (!(v->getFlags() & VOL_PROVIDES_ASEC)) {
+        return 0;
+    }
 
     for (AsecIdCollection::iterator it = mActiveContainers->begin(); it != mActiveContainers->end();
             ++it) {
