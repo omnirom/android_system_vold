@@ -1250,6 +1250,39 @@ int VolumeManager::shareEnabled(const char *label, const char *method, bool *ena
     return 0;
 }
 
+static const char *LUN_FILES[] = {
+#ifdef CUSTOM_LUN_FILE
+    CUSTOM_LUN_FILE,
+#endif
+    /* Only andriod0 exists, but the %d in there is a hack to satisfy the
+       format string and also give a not found error when %d > 0 */
+    "/sys/devices/platform/msm_hsusb/gadget/lun0/file",
+    "/sys/class/android_usb/android0/f_mass_storage/lun0/file",
+    "/sys/class/android_usb/android%d/f_mass_storage/lun/file",
+    "/sys/devices/virtual/android_usb/android0/f_mass_storage/lun",
+    NULL
+};
+
+int VolumeManager::openLun(int number) {
+    const char **iterator = LUN_FILES;
+    char qualified_lun[255];
+    while (*iterator) {
+        bzero(qualified_lun, 255);
+        snprintf(qualified_lun, 254, *iterator, number);
+        int fd = open(qualified_lun, O_WRONLY);
+        if (fd >= 0) {
+            SLOGD("Opened lunfile %s", qualified_lun);
+            return fd;
+        }
+        SLOGE("Unable to open ums lunfile %s (%s)", qualified_lun, strerror(errno));
+        iterator++;
+    }
+
+    errno = EINVAL;
+    SLOGE("Unable to find ums lunfile for LUN %d", number);
+    return -1;
+}
+
 int VolumeManager::shareVolume(const char *label, const char *method) {
     Volume *v = lookupVolume(label);
 
