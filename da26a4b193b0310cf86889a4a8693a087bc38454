@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "key": {
+        "uuid": "8b77b57d_c9f52182",
+        "filename": "Exfat.cpp",
+        "patchSetId": 5
+      },
+      "lineNbr": 71,
+      "author": {
+        "id": 1000551
+      },
+      "writtenOn": "2014-04-28T23:45:15Z",
+      "side": 1,
+      "message": "Maybe we have to place it in L 62?\nThink it breaks vold exFAT if it is placed here.",
+      "revId": "da26a4b193b0310cf86889a4a8693a087bc38454",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    }
+  ]
+}
