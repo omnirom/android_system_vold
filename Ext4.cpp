@@ -58,11 +58,12 @@ int Ext4::doMount(const char *fsPath, const char *mountPoint, bool ro, bool remo
     flags |= (ro ? MS_RDONLY : 0);
     flags |= (remount ? MS_REMOUNT : 0);
 
+#ifdef HAVE_SELINUX
     if (sdcard) {
         // Mount external volumes with forced context
         data = "context=u:object_r:sdcard_external:s0";
     }
-
+#endif
     rc = mount(fsPath, mountPoint, "ext4", flags, data);
 
     if (rc && errno == EROFS) {
