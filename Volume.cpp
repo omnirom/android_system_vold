@@ -520,6 +520,7 @@ int Volume::mountVol() {
                     errno = EIO;
                     /* Badness - abort the mount */
                     SLOGE("%s failed FS checks (%s)", devicePath, strerror(errno));
+                    SLOGE("Will try to mount...");
                     setState(Volume::State_Idle);
                     free(fstype);
                     return -1;
