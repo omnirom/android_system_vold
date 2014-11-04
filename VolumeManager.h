@@ -77,7 +77,7 @@ public:
 
     int addVolume(Volume *v);
 
-    int listVolumes(SocketClient *cli);
+    int listVolumes(SocketClient *cli, bool broadcast);
     int mountVolume(const char *label);
     int unmountVolume(const char *label, bool force, bool revert);
     int shareVolume(const char *label, const char *method);
@@ -91,6 +91,7 @@ public:
             const char **directory = NULL) const;
     int createAsec(const char *id, unsigned numSectors, const char *fstype,
                    const char *key, const int ownerUid, bool isExternal);
+    int resizeAsec(const char *id, unsigned numSectors, const char *key);
     int finalizeAsec(const char *id);
 
     /**
@@ -105,7 +106,7 @@ public:
      */
     int fixupAsecPermissions(const char *id, gid_t gid, const char* privateFilename);
     int destroyAsec(const char *id, bool force);
-    int mountAsec(const char *id, const char *key, int ownerUid);
+    int mountAsec(const char *id, const char *key, int ownerUid, bool readOnly);
     int unmountAsec(const char *id, bool force);
     int renameAsec(const char *id1, const char *id2);
     int getAsecMountPath(const char *id, char *buffer, int maxlen);

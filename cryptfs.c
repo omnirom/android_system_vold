@@ -23,7 +23,9 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <ctype.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
@@ -34,11 +36,11 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <openssl/evp.h>
-#include <openssl/sha.h>
 #include <errno.h>
 #include <ext4.h>
 #include <linux/kdev_t.h>
 #include <fs_mgr.h>
+#include <time.h>
 #include "cryptfs.h"
 #define LOG_TAG "Cryptfs"
 #include "cutils/log.h"
@@ -49,9 +51,18 @@
 #include "VolumeManager.h"
 #include "VoldUtil.h"
 #include "crypto_scrypt.h"
+#include "ext4_utils.h"
+#include "f2fs_sparseblock.h"
+#include "CheckBattery.h"
+#include "Process.h"
+
+#include <hardware/keymaster.h>
+
+#define UNUSED __attribute__((unused))
+
+#define UNUSED __attribute__((unused))
 
 #define DM_CRYPT_BUF_SIZE 4096
-#define DATA_MNT_POINT "/data"
 
 #define HASH_COUNT 2000
 #define KEY_LEN_BYTES 16
@@ -59,10 +70,20 @@
 
 #define KEY_IN_FOOTER  "footer"
 
+// "default_password" encoded into hex (d=0x64 etc)
+#define DEFAULT_PASSWORD "64656661756c745f70617373776f7264"
+
 #define EXT4_FS 1
-#define FAT_FS 2
+#define F2FS_FS 2
 
 #define TABLE_LOAD_RETRIES 10
+
+#define RSA_KEY_SIZE 2048
+#define RSA_KEY_SIZE_BYTES (RSA_KEY_SIZE / 8)
+#define RSA_EXPONENT 0x10001
+
+#define RETRY_MOUNT_ATTEMPTS 10
+#define RETRY_MOUNT_DELAY_SECONDS 1
 
 char *me = "cryptfs";
 
@@ -71,15 +92,224 @@ static char *saved_mount_point;
 static int  master_key_saved = 0;
 static struct crypt_persist_data *persist_data = NULL;
 
+static int keymaster_init(keymaster_device_t **keymaster_dev)
+{
+    int rc;
+
+    const hw_module_t* mod;
+    rc = hw_get_module_by_class(KEYSTORE_HARDWARE_MODULE_ID, NULL, &mod);
+    if (rc) {
+        ALOGE("could not find any keystore module");
+        goto out;
+    }
+
+    rc = keymaster_open(mod, keymaster_dev);
+    if (rc) {
+        ALOGE("could not open keymaster device in %s (%s)",
+            KEYSTORE_HARDWARE_MODULE_ID, strerror(-rc));
+        goto out;
+    }
+
+    return 0;
+
+out:
+    *keymaster_dev = NULL;
+    return rc;
+}
+
+/* Should we use keymaster? */
+static int keymaster_check_compatibility()
+{
+    keymaster_device_t *keymaster_dev = 0;
+    int rc = 0;
+
+    if (keymaster_init(&keymaster_dev)) {
+        SLOGE("Failed to init keymaster");
+        rc = -1;
+        goto out;
+    }
+
+    SLOGI("keymaster version is %d", keymaster_dev->common.module->module_api_version);
+
+    if (keymaster_dev->common.module->module_api_version
+            < KEYMASTER_MODULE_API_VERSION_0_3) {
+        rc = 0;
+        goto out;
+    }
+
+    if (keymaster_dev->flags & KEYMASTER_BLOBS_ARE_STANDALONE) {
+        rc = 1;
+    }
+
+out:
+    keymaster_close(keymaster_dev);
+    return rc;
+}
+
+/* Create a new keymaster key and store it in this footer */
+static int keymaster_create_key(struct crypt_mnt_ftr *ftr)
+{
+    uint8_t* key = 0;
+    keymaster_device_t *keymaster_dev = 0;
+
+    if (keymaster_init(&keymaster_dev)) {
+        SLOGE("Failed to init keymaster");
+        return -1;
+    }
+
+    int rc = 0;
+
+    keymaster_rsa_keygen_params_t params;
+    memset(&params, '\0', sizeof(params));
+    params.public_exponent = RSA_EXPONENT;
+    params.modulus_size = RSA_KEY_SIZE;
+
+    size_t key_size;
+    if (keymaster_dev->generate_keypair(keymaster_dev, TYPE_RSA, &params,
+                                        &key, &key_size)) {
+        SLOGE("Failed to generate keypair");
+        rc = -1;
+        goto out;
+    }
+
+    if (key_size > KEYMASTER_BLOB_SIZE) {
+        SLOGE("Keymaster key too large for crypto footer");
+        rc = -1;
+        goto out;
+    }
+
+    memcpy(ftr->keymaster_blob, key, key_size);
+    ftr->keymaster_blob_size = key_size;
+
+out:
+    keymaster_close(keymaster_dev);
+    free(key);
+    return rc;
+}
+
+/* This signs the given object using the keymaster key. */
+static int keymaster_sign_object(struct crypt_mnt_ftr *ftr,
+                                 const unsigned char *object,
+                                 const size_t object_size,
+                                 unsigned char **signature,
+                                 size_t *signature_size)
+{
+    int rc = 0;
+    keymaster_device_t *keymaster_dev = 0;
+    if (keymaster_init(&keymaster_dev)) {
+        SLOGE("Failed to init keymaster");
+        return -1;
+    }
+
+    /* We currently set the digest type to DIGEST_NONE because it's the
+     * only supported value for keymaster. A similar issue exists with
+     * PADDING_NONE. Long term both of these should likely change.
+     */
+    keymaster_rsa_sign_params_t params;
+    params.digest_type = DIGEST_NONE;
+    params.padding_type = PADDING_NONE;
+
+    unsigned char to_sign[RSA_KEY_SIZE_BYTES];
+    size_t to_sign_size = sizeof(to_sign);
+    memset(to_sign, 0, RSA_KEY_SIZE_BYTES);
+
+    // To sign a message with RSA, the message must satisfy two
+    // constraints:
+    //
+    // 1. The message, when interpreted as a big-endian numeric value, must
+    //    be strictly less than the public modulus of the RSA key.  Note
+    //    that because the most significant bit of the public modulus is
+    //    guaranteed to be 1 (else it's an (n-1)-bit key, not an n-bit
+    //    key), an n-bit message with most significant bit 0 always
+    //    satisfies this requirement.
+    //
+    // 2. The message must have the same length in bits as the public
+    //    modulus of the RSA key.  This requirement isn't mathematically
+    //    necessary, but is necessary to ensure consistency in
+    //    implementations.
+    switch (ftr->kdf_type) {
+        case KDF_SCRYPT_KEYMASTER_UNPADDED:
+            // This is broken: It produces a message which is shorter than
+            // the public modulus, failing criterion 2.
+            memcpy(to_sign, object, object_size);
+            to_sign_size = object_size;
+            SLOGI("Signing unpadded object");
+            break;
+        case KDF_SCRYPT_KEYMASTER_BADLY_PADDED:
+            // This is broken: Since the value of object is uniformly
+            // distributed, it produces a message that is larger than the
+            // public modulus with probability 0.25.
+            memcpy(to_sign, object, min(RSA_KEY_SIZE_BYTES, object_size));
+            SLOGI("Signing end-padded object");
+            break;
+        case KDF_SCRYPT_KEYMASTER:
+            // This ensures the most significant byte of the signed message
+            // is zero.  We could have zero-padded to the left instead, but
+            // this approach is slightly more robust against changes in
+            // object size.  However, it's still broken (but not unusably
+            // so) because we really should be using a proper RSA padding
+            // function, such as OAEP.
+            //
+            // TODO(paullawrence): When keymaster 0.4 is available, change
+            // this to use the padding options it provides.
+            memcpy(to_sign + 1, object, min(RSA_KEY_SIZE_BYTES - 1, object_size));
+            SLOGI("Signing safely-padded object");
+            break;
+        default:
+            SLOGE("Unknown KDF type %d", ftr->kdf_type);
+            return -1;
+    }
+
+    rc = keymaster_dev->sign_data(keymaster_dev,
+                                  &params,
+                                  ftr->keymaster_blob,
+                                  ftr->keymaster_blob_size,
+                                  to_sign,
+                                  to_sign_size,
+                                  signature,
+                                  signature_size);
+
+    keymaster_close(keymaster_dev);
+    return rc;
+}
+
+/* Store password when userdata is successfully decrypted and mounted.
+ * Cleared by cryptfs_clear_password
+ *
+ * To avoid a double prompt at boot, we need to store the CryptKeeper
+ * password and pass it to KeyGuard, which uses it to unlock KeyStore.
+ * Since the entire framework is torn down and rebuilt after encryption,
+ * we have to use a daemon or similar to store the password. Since vold
+ * is secured against IPC except from system processes, it seems a reasonable
+ * place to store this.
+ *
+ * password should be cleared once it has been used.
+ *
+ * password is aged out after password_max_age_seconds seconds.
+ */
+static char* password = 0;
+static int password_expiry_time = 0;
+static const int password_max_age_seconds = 60;
+
 extern struct fstab *fstab;
 
-static void cryptfs_reboot(int recovery)
+enum RebootType {reboot, recovery, shutdown};
+static void cryptfs_reboot(enum RebootType rt)
 {
-    if (recovery) {
-        property_set(ANDROID_RB_PROPERTY, "reboot,recovery");
-    } else {
-        property_set(ANDROID_RB_PROPERTY, "reboot");
+  switch(rt) {
+      case reboot:
+          property_set(ANDROID_RB_PROPERTY, "reboot");
+          break;
+
+      case recovery:
+          property_set(ANDROID_RB_PROPERTY, "reboot,recovery");
+          break;
+
+      case shutdown:
+          property_set(ANDROID_RB_PROPERTY, "shutdown");
+          break;
     }
+
     sleep(20);
 
     /* Shouldn't get here, reboot should happen before sleep times out */
@@ -173,6 +403,10 @@ static unsigned int get_fs_size(char *dev)
 
     close(fd);
 
+    if (le32_to_cpu(sb.s_magic) != EXT4_SUPER_MAGIC) {
+        SLOGE("Not a valid ext4 superblock");
+        return 0;
+    }
     block_size = 1024 << sb.s_log_block_size;
     /* compute length in bytes */
     len = ( ((off64_t)sb.s_blocks_count_hi << 32) + sb.s_blocks_count_lo) * block_size;
@@ -276,7 +510,7 @@ static int put_crypt_ftr_and_key(struct crypt_mnt_ftr *crypt_ftr)
   /* If the keys are kept on a raw block device, do not try to truncate it. */
   if (S_ISREG(statbuf.st_mode)) {
     if (ftruncate(fd, 0x4000)) {
-      SLOGE("Cannot set footer file size\n", fname);
+      SLOGE("Cannot set footer file size\n");
       goto errout;
     }
   }
@@ -349,7 +583,7 @@ static void upgrade_crypt_ftr(int fd, struct crypt_mnt_ftr *crypt_ftr, off64_t o
         crypt_ftr->minor_version = 1;
     }
 
-    if ((crypt_ftr->major_version == 1) && (crypt_ftr->minor_version)) {
+    if ((crypt_ftr->major_version == 1) && (crypt_ftr->minor_version == 1)) {
         SLOGW("upgrading crypto footer to 1.2");
         /* But keep the old kdf_type.
          * It will get updated later to KDF_SCRYPT after the password has been verified.
@@ -357,6 +591,12 @@ static void upgrade_crypt_ftr(int fd, struct crypt_mnt_ftr *crypt_ftr, off64_t o
         crypt_ftr->kdf_type = KDF_PBKDF2;
         get_device_scrypt_params(crypt_ftr);
         crypt_ftr->minor_version = 2;
+    }
+
+    if ((crypt_ftr->major_version == 1) && (crypt_ftr->minor_version == 2)) {
+        SLOGW("upgrading crypto footer to 1.3");
+        crypt_ftr->crypt_type = CRYPT_TYPE_PASSWORD;
+        crypt_ftr->minor_version = 3;
     }
 
     if ((orig_major != crypt_ftr->major_version) || (orig_minor != crypt_ftr->minor_version)) {
@@ -496,7 +736,8 @@ static int load_persistent_data(void)
         return -1;
     }
 
-    if ((crypt_ftr.major_version != 1) || (crypt_ftr.minor_version != 1)) {
+    if ((crypt_ftr.major_version < 1)
+        || (crypt_ftr.major_version == 1 && crypt_ftr.minor_version < 1)) {
         SLOGE("Crypt_ftr version doesn't support persistent data");
         return -1;
     }
@@ -577,7 +818,8 @@ static int save_persistent_data(void)
         return -1;
     }
 
-    if ((crypt_ftr.major_version != 1) || (crypt_ftr.minor_version != 1)) {
+    if ((crypt_ftr.major_version < 1)
+        || (crypt_ftr.major_version == 1 && crypt_ftr.minor_version < 1)) {
         SLOGE("Crypt_ftr version doesn't support persistent data");
         return -1;
     }
@@ -661,10 +903,53 @@ err:
     return -1;
 }
 
+static int hexdigit (char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    c = tolower(c);
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+static unsigned char* convert_hex_ascii_to_key(const char* master_key_ascii,
+                                               unsigned int* out_keysize)
+{
+    unsigned int i;
+    *out_keysize = 0;
+
+    size_t size = strlen (master_key_ascii);
+    if (size % 2) {
+        SLOGE("Trying to convert ascii string of odd length");
+        return NULL;
+    }
+
+    unsigned char* master_key = (unsigned char*) malloc(size / 2);
+    if (master_key == 0) {
+        SLOGE("Cannot allocate");
+        return NULL;
+    }
+
+    for (i = 0; i < size; i += 2) {
+        int high_nibble = hexdigit (master_key_ascii[i]);
+        int low_nibble = hexdigit (master_key_ascii[i + 1]);
+
+        if(high_nibble < 0 || low_nibble < 0) {
+            SLOGE("Invalid hex string");
+            free (master_key);
+            return NULL;
+        }
+
+        master_key[*out_keysize] = high_nibble * 16 + low_nibble;
+        (*out_keysize)++;
+    }
+
+    return master_key;
+}
+
 /* Convert a binary key of specified length into an ascii hex string equivalent,
  * without the leading 0x and with null termination
  */
-void convert_key_to_hex_ascii(unsigned char *master_key, unsigned int keysize,
+static void convert_key_to_hex_ascii(unsigned char *master_key, unsigned int keysize,
                               char *master_key_ascii)
 {
   unsigned int i, a;
@@ -868,13 +1153,28 @@ errout:
 
 }
 
-static void pbkdf2(char *passwd, unsigned char *salt, unsigned char *ikey, void *params) {
+static int pbkdf2(const char *passwd, const unsigned char *salt,
+                  unsigned char *ikey, void *params UNUSED)
+{
+    SLOGI("Using pbkdf2 for cryptfs KDF");
+
     /* Turn the password into a key and IV that can decrypt the master key */
-    PKCS5_PBKDF2_HMAC_SHA1(passwd, strlen(passwd), salt, SALT_LEN,
+    unsigned int keysize;
+    char* master_key = (char*)convert_hex_ascii_to_key(passwd, &keysize);
+    if (!master_key) return -1;
+    PKCS5_PBKDF2_HMAC_SHA1(master_key, keysize, salt, SALT_LEN,
                            HASH_COUNT, KEY_LEN_BYTES+IV_LEN_BYTES, ikey);
+
+    memset(master_key, 0, keysize);
+    free (master_key);
+    return 0;
 }
 
-static void scrypt(char *passwd, unsigned char *salt, unsigned char *ikey, void *params) {
+static int scrypt(const char *passwd, const unsigned char *salt,
+                  unsigned char *ikey, void *params)
+{
+    SLOGI("Using scrypt for cryptfs KDF");
+
     struct crypt_mnt_ftr *ftr = (struct crypt_mnt_ftr *) params;
 
     int N = 1 << ftr->N_factor;
@@ -882,22 +1182,105 @@ static void scrypt(char *passwd, unsigned char *salt, unsigned char *ikey, void 
     int p = 1 << ftr->p_factor;
 
     /* Turn the password into a key and IV that can decrypt the master key */
-    crypto_scrypt((unsigned char *) passwd, strlen(passwd), salt, SALT_LEN, N, r, p, ikey,
+    unsigned int keysize;
+    unsigned char* master_key = convert_hex_ascii_to_key(passwd, &keysize);
+    if (!master_key) return -1;
+    crypto_scrypt(master_key, keysize, salt, SALT_LEN, N, r, p, ikey,
             KEY_LEN_BYTES + IV_LEN_BYTES);
+
+    memset(master_key, 0, keysize);
+    free (master_key);
+    return 0;
 }
 
-static int encrypt_master_key(char *passwd, unsigned char *salt,
-                              unsigned char *decrypted_master_key,
+static int scrypt_keymaster(const char *passwd, const unsigned char *salt,
+                            unsigned char *ikey, void *params)
+{
+    SLOGI("Using scrypt with keymaster for cryptfs KDF");
+
+    int rc;
+    unsigned int key_size;
+    size_t signature_size;
+    unsigned char* signature;
+    struct crypt_mnt_ftr *ftr = (struct crypt_mnt_ftr *) params;
+
+    int N = 1 << ftr->N_factor;
+    int r = 1 << ftr->r_factor;
+    int p = 1 << ftr->p_factor;
+
+    unsigned char* master_key = convert_hex_ascii_to_key(passwd, &key_size);
+    if (!master_key) {
+        SLOGE("Failed to convert passwd from hex");
+        return -1;
+    }
+
+    rc = crypto_scrypt(master_key, key_size, salt, SALT_LEN,
+                       N, r, p, ikey, KEY_LEN_BYTES + IV_LEN_BYTES);
+    memset(master_key, 0, key_size);
+    free(master_key);
+
+    if (rc) {
+        SLOGE("scrypt failed");
+        return -1;
+    }
+
+    if (keymaster_sign_object(ftr, ikey, KEY_LEN_BYTES + IV_LEN_BYTES,
+                              &signature, &signature_size)) {
+        SLOGE("Signing failed");
+        return -1;
+    }
+
+    rc = crypto_scrypt(signature, signature_size, salt, SALT_LEN,
+                       N, r, p, ikey, KEY_LEN_BYTES + IV_LEN_BYTES);
+    free(signature);
+
+    if (rc) {
+        SLOGE("scrypt failed");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int encrypt_master_key(const char *passwd, const unsigned char *salt,
+                              const unsigned char *decrypted_master_key,
                               unsigned char *encrypted_master_key,
                               struct crypt_mnt_ftr *crypt_ftr)
 {
     unsigned char ikey[32+32] = { 0 }; /* Big enough to hold a 256 bit key and 256 bit IV */
     EVP_CIPHER_CTX e_ctx;
     int encrypted_len, final_len;
+    int rc = 0;
 
-    /* Turn the password into a key and IV that can decrypt the master key */
+    /* Turn the password into an intermediate key and IV that can decrypt the master key */
     get_device_scrypt_params(crypt_ftr);
-    scrypt(passwd, salt, ikey, crypt_ftr);
+
+    switch (crypt_ftr->kdf_type) {
+    case KDF_SCRYPT_KEYMASTER_UNPADDED:
+    case KDF_SCRYPT_KEYMASTER_BADLY_PADDED:
+    case KDF_SCRYPT_KEYMASTER:
+        if (keymaster_create_key(crypt_ftr)) {
+            SLOGE("keymaster_create_key failed");
+            return -1;
+        }
+
+        if (scrypt_keymaster(passwd, salt, ikey, crypt_ftr)) {
+            SLOGE("scrypt failed");
+            return -1;
+        }
+        break;
+
+    case KDF_SCRYPT:
+        if (scrypt(passwd, salt, ikey, crypt_ftr)) {
+            SLOGE("scrypt failed");
+            return -1;
+        }
+        break;
+
+    default:
+        SLOGE("Invalid kdf_type");
+        return -1;
+    }
 
     /* Initialize the decryption engine */
     if (! EVP_EncryptInit(&e_ctx, EVP_aes_128_cbc(), ikey, ikey+KEY_LEN_BYTES)) {
@@ -920,22 +1303,46 @@ static int encrypt_master_key(char *passwd, unsigned char *salt,
     if (encrypted_len + final_len != KEY_LEN_BYTES) {
         SLOGE("EVP_Encryption length check failed with %d, %d bytes\n", encrypted_len, final_len);
         return -1;
-    } else {
-        return 0;
     }
+
+    /* Store the scrypt of the intermediate key, so we can validate if it's a
+       password error or mount error when things go wrong.
+       Note there's no need to check for errors, since if this is incorrect, we
+       simply won't wipe userdata, which is the correct default behavior
+    */
+    int N = 1 << crypt_ftr->N_factor;
+    int r = 1 << crypt_ftr->r_factor;
+    int p = 1 << crypt_ftr->p_factor;
+
+    rc = crypto_scrypt(ikey, KEY_LEN_BYTES,
+                       crypt_ftr->salt, sizeof(crypt_ftr->salt), N, r, p,
+                       crypt_ftr->scrypted_intermediate_key,
+                       sizeof(crypt_ftr->scrypted_intermediate_key));
+
+    if (rc) {
+      SLOGE("encrypt_master_key: crypto_scrypt failed");
+    }
+
+    return 0;
 }
 
 static int decrypt_master_key_aux(char *passwd, unsigned char *salt,
-                              unsigned char *encrypted_master_key,
-                              unsigned char *decrypted_master_key,
-                              kdf_func kdf, void *kdf_params)
+                                  unsigned char *encrypted_master_key,
+                                  unsigned char *decrypted_master_key,
+                                  kdf_func kdf, void *kdf_params,
+                                  unsigned char** intermediate_key,
+                                  size_t* intermediate_key_size)
 {
   unsigned char ikey[32+32] = { 0 }; /* Big enough to hold a 256 bit key and 256 bit IV */
   EVP_CIPHER_CTX d_ctx;
   int decrypted_len, final_len;
 
-  /* Turn the password into a key and IV that can decrypt the master key */
-  kdf(passwd, salt, ikey, kdf_params);
+  /* Turn the password into an intermediate key and IV that can decrypt the
+     master key */
+  if (kdf(passwd, salt, ikey, kdf_params)) {
+    SLOGE("kdf failed");
+    return -1;
+  }
 
   /* Initialize the decryption engine */
   if (! EVP_DecryptInit(&d_ctx, EVP_aes_128_cbc(), ikey, ikey+KEY_LEN_BYTES)) {
@@ -953,14 +1360,28 @@ static int decrypt_master_key_aux(char *passwd, unsigned char *salt,
 
   if (decrypted_len + final_len != KEY_LEN_BYTES) {
     return -1;
-  } else {
-    return 0;
   }
+
+  /* Copy intermediate key if needed by params */
+  if (intermediate_key && intermediate_key_size) {
+    *intermediate_key = (unsigned char*) malloc(KEY_LEN_BYTES);
+    if (intermediate_key) {
+      memcpy(*intermediate_key, ikey, KEY_LEN_BYTES);
+      *intermediate_key_size = KEY_LEN_BYTES;
+    }
+  }
+
+  return 0;
 }
 
 static void get_kdf_func(struct crypt_mnt_ftr *ftr, kdf_func *kdf, void** kdf_params)
 {
-    if (ftr->kdf_type == KDF_SCRYPT) {
+    if (ftr->kdf_type == KDF_SCRYPT_KEYMASTER_UNPADDED ||
+        ftr->kdf_type == KDF_SCRYPT_KEYMASTER_BADLY_PADDED ||
+        ftr->kdf_type == KDF_SCRYPT_KEYMASTER) {
+        *kdf = scrypt_keymaster;
+        *kdf_params = ftr;
+    } else if (ftr->kdf_type == KDF_SCRYPT) {
         *kdf = scrypt;
         *kdf_params = ftr;
     } else {
@@ -970,15 +1391,18 @@ static void get_kdf_func(struct crypt_mnt_ftr *ftr, kdf_func *kdf, void** kdf_pa
 }
 
 static int decrypt_master_key(char *passwd, unsigned char *decrypted_master_key,
-        struct crypt_mnt_ftr *crypt_ftr)
+                              struct crypt_mnt_ftr *crypt_ftr,
+                              unsigned char** intermediate_key,
+                              size_t* intermediate_key_size)
 {
     kdf_func kdf;
     void *kdf_params;
     int ret;
 
     get_kdf_func(crypt_ftr, &kdf, &kdf_params);
-    ret = decrypt_master_key_aux(passwd, crypt_ftr->salt, crypt_ftr->master_key, decrypted_master_key, kdf,
-            kdf_params);
+    ret = decrypt_master_key_aux(passwd, crypt_ftr->salt, crypt_ftr->master_key,
+                                 decrypted_master_key, kdf, kdf_params,
+                                 intermediate_key, intermediate_key_size);
     if (ret != 0) {
         SLOGW("failure decrypting master key");
     }
@@ -1003,32 +1427,46 @@ static int create_encrypted_random_key(char *passwd, unsigned char *master_key, 
     return encrypt_master_key(passwd, salt, key_buf, master_key, crypt_ftr);
 }
 
-static int wait_and_unmount(char *mountpoint)
+static int wait_and_unmount(char *mountpoint, bool kill)
 {
-    int i, rc;
+    int i, err, rc;
 #define WAIT_UNMOUNT_COUNT 20
 
     /*  Now umount the tmpfs filesystem */
     for (i=0; i<WAIT_UNMOUNT_COUNT; i++) {
-        if (umount(mountpoint)) {
-            if (errno == EINVAL) {
-                /* EINVAL is returned if the directory is not a mountpoint,
-                 * i.e. there is no filesystem mounted there.  So just get out.
-                 */
-                break;
-            }
-            sleep(1);
-            i++;
-        } else {
-          break;
+        if (umount(mountpoint) == 0) {
+            break;
         }
+
+        if (errno == EINVAL) {
+            /* EINVAL is returned if the directory is not a mountpoint,
+             * i.e. there is no filesystem mounted there.  So just get out.
+             */
+            break;
+        }
+
+        err = errno;
+
+        /* If allowed, be increasingly aggressive before the last two retries */
+        if (kill) {
+            if (i == (WAIT_UNMOUNT_COUNT - 3)) {
+                SLOGW("sending SIGHUP to processes with open files\n");
+                vold_killProcessesWithOpenFiles(mountpoint, 1);
+            } else if (i == (WAIT_UNMOUNT_COUNT - 2)) {
+                SLOGW("sending SIGKILL to processes with open files\n");
+                vold_killProcessesWithOpenFiles(mountpoint, 2);
+            }
+        }
+
+        sleep(1);
     }
 
     if (i < WAIT_UNMOUNT_COUNT) {
       SLOGD("unmounting %s succeeded\n", mountpoint);
       rc = 0;
     } else {
-      SLOGE("unmounting %s failed\n", mountpoint);
+      vold_killProcessesWithOpenFiles(mountpoint, 0);
+      SLOGE("unmounting %s failed: %s\n", mountpoint, strerror(err));
       rc = -1;
     }
 
@@ -1066,7 +1504,42 @@ static int prep_data_fs(void)
     }
 }
 
-int cryptfs_restart(void)
+static void cryptfs_set_corrupt()
+{
+    // Mark the footer as bad
+    struct crypt_mnt_ftr crypt_ftr;
+    if (get_crypt_ftr_and_key(&crypt_ftr)) {
+        SLOGE("Failed to get crypto footer - panic");
+        return;
+    }
+
+    crypt_ftr.flags |= CRYPT_DATA_CORRUPT;
+    if (put_crypt_ftr_and_key(&crypt_ftr)) {
+        SLOGE("Failed to set crypto footer - panic");
+        return;
+    }
+}
+
+static void cryptfs_trigger_restart_min_framework()
+{
+    if (fs_mgr_do_tmpfs_mount(DATA_MNT_POINT)) {
+      SLOGE("Failed to mount tmpfs on data - panic");
+      return;
+    }
+
+    if (property_set("vold.decrypt", "trigger_post_fs_data")) {
+        SLOGE("Failed to trigger post fs data - panic");
+        return;
+    }
+
+    if (property_set("vold.decrypt", "trigger_restart_min_framework")) {
+        SLOGE("Failed to trigger restart min framework - panic");
+        return;
+    }
+}
+
+/* returns < 0 on failure */
+static int cryptfs_restart_internal(int restart_main)
 {
     char fs_type[32];
     char real_blkdev[MAXPATHLEN];
@@ -1088,32 +1561,34 @@ int cryptfs_restart(void)
         return -1;
     }
 
-    /* Here is where we shut down the framework.  The init scripts
-     * start all services in one of three classes: core, main or late_start.
-     * On boot, we start core and main.  Now, we stop main, but not core,
-     * as core includes vold and a few other really important things that
-     * we need to keep running.  Once main has stopped, we should be able
-     * to umount the tmpfs /data, then mount the encrypted /data.
-     * We then restart the class main, and also the class late_start.
-     * At the moment, I've only put a few things in late_start that I know
-     * are not needed to bring up the framework, and that also cause problems
-     * with unmounting the tmpfs /data, but I hope to add add more services
-     * to the late_start class as we optimize this to decrease the delay
-     * till the user is asked for the password to the filesystem.
-     */
+    if (restart_main) {
+        /* Here is where we shut down the framework.  The init scripts
+         * start all services in one of three classes: core, main or late_start.
+         * On boot, we start core and main.  Now, we stop main, but not core,
+         * as core includes vold and a few other really important things that
+         * we need to keep running.  Once main has stopped, we should be able
+         * to umount the tmpfs /data, then mount the encrypted /data.
+         * We then restart the class main, and also the class late_start.
+         * At the moment, I've only put a few things in late_start that I know
+         * are not needed to bring up the framework, and that also cause problems
+         * with unmounting the tmpfs /data, but I hope to add add more services
+         * to the late_start class as we optimize this to decrease the delay
+         * till the user is asked for the password to the filesystem.
+         */
 
-    /* The init files are setup to stop the class main when vold.decrypt is
-     * set to trigger_reset_main.
-     */
-    property_set("vold.decrypt", "trigger_reset_main");
-    SLOGD("Just asked init to shut down class main\n");
+        /* The init files are setup to stop the class main when vold.decrypt is
+         * set to trigger_reset_main.
+         */
+        property_set("vold.decrypt", "trigger_reset_main");
+        SLOGD("Just asked init to shut down class main\n");
 
-    /* Ugh, shutting down the framework is not synchronous, so until it
-     * can be fixed, this horrible hack will wait a moment for it all to
-     * shut down before proceeding.  Without it, some devices cannot
-     * restart the graphics services.
-     */
-    sleep(2);
+        /* Ugh, shutting down the framework is not synchronous, so until it
+         * can be fixed, this horrible hack will wait a moment for it all to
+         * shut down before proceeding.  Without it, some devices cannot
+         * restart the graphics services.
+         */
+        sleep(2);
+    }
 
     /* Now that the framework is shutdown, we should be able to umount()
      * the tmpfs filesystem, and mount the real one.
@@ -1125,9 +1600,45 @@ int cryptfs_restart(void)
         return -1;
     }
 
-    if (! (rc = wait_and_unmount(DATA_MNT_POINT)) ) {
+    if (! (rc = wait_and_unmount(DATA_MNT_POINT, true)) ) {
+        /* If ro.crypto.readonly is set to 1, mount the decrypted
+         * filesystem readonly.  This is used when /data is mounted by
+         * recovery mode.
+         */
+        char ro_prop[PROPERTY_VALUE_MAX];
+        property_get("ro.crypto.readonly", ro_prop, "");
+        if (strlen(ro_prop) > 0 && atoi(ro_prop)) {
+            struct fstab_rec* rec = fs_mgr_get_entry_for_mount_point(fstab, DATA_MNT_POINT);
+            rec->flags |= MS_RDONLY;
+        }
+
         /* If that succeeded, then mount the decrypted filesystem */
-        fs_mgr_do_mount(fstab, DATA_MNT_POINT, crypto_blkdev, 0);
+        int retries = RETRY_MOUNT_ATTEMPTS;
+        int mount_rc;
+        while ((mount_rc = fs_mgr_do_mount(fstab, DATA_MNT_POINT,
+                                           crypto_blkdev, 0))
+               != 0) {
+            if (mount_rc == FS_MGR_DOMNT_BUSY) {
+                /* TODO: invoke something similar to
+                   Process::killProcessWithOpenFiles(DATA_MNT_POINT,
+                                   retries > RETRY_MOUNT_ATTEMPT/2 ? 1 : 2 ) */
+                SLOGI("Failed to mount %s because it is busy - waiting",
+                      crypto_blkdev);
+                if (--retries) {
+                    sleep(RETRY_MOUNT_DELAY_SECONDS);
+                } else {
+                    /* Let's hope that a reboot clears away whatever is keeping
+                       the mount busy */
+                    cryptfs_reboot(reboot);
+                }
+            } else {
+                SLOGE("Failed to mount decrypted data");
+                cryptfs_set_corrupt();
+                cryptfs_trigger_restart_min_framework();
+                SLOGI("Started framework to offer wipe");
+                return -1;
+            }
+        }
 
         property_set("vold.decrypt", "trigger_load_persist_props");
         /* Create necessary paths on /data */
@@ -1150,7 +1661,13 @@ int cryptfs_restart(void)
     return rc;
 }
 
-static int do_crypto_complete(char *mount_point)
+int cryptfs_restart(void)
+{
+    /* Call internal implementation forcing a restart of main service group */
+    return cryptfs_restart_internal(1);
+}
+
+static int do_crypto_complete(char *mount_point UNUSED)
 {
   struct crypt_mnt_ftr crypt_ftr;
   char encrypted_state[PROPERTY_VALUE_MAX];
@@ -1159,7 +1676,7 @@ static int do_crypto_complete(char *mount_point)
   property_get("ro.crypto.state", encrypted_state, "");
   if (strcmp(encrypted_state, "encrypted") ) {
     SLOGE("not running with encryption, aborting");
-    return 1;
+    return CRYPTO_COMPLETE_NOT_ENCRYPTED;
   }
 
   if (get_crypt_ftr_and_key(&crypt_ftr)) {
@@ -1174,123 +1691,166 @@ static int do_crypto_complete(char *mount_point)
      */
     if ((key_loc[0] == '/') && (access("key_loc", F_OK) == -1)) {
       SLOGE("master key file does not exist, aborting");
-      return 1;
+      return CRYPTO_COMPLETE_NOT_ENCRYPTED;
     } else {
       SLOGE("Error getting crypt footer and key\n");
-      return -1;
+      return CRYPTO_COMPLETE_BAD_METADATA;
     }
   }
 
-  if (crypt_ftr.flags & CRYPT_ENCRYPTION_IN_PROGRESS) {
-    SLOGE("Encryption process didn't finish successfully\n");
-    return -2;  /* -2 is the clue to the UI that there is no usable data on the disk,
-                 * and give the user an option to wipe the disk */
+  // Test for possible error flags
+  if (crypt_ftr.flags & CRYPT_ENCRYPTION_IN_PROGRESS){
+    SLOGE("Encryption process is partway completed\n");
+    return CRYPTO_COMPLETE_PARTIAL;
+  }
+
+  if (crypt_ftr.flags & CRYPT_INCONSISTENT_STATE){
+    SLOGE("Encryption process was interrupted but cannot continue\n");
+    return CRYPTO_COMPLETE_INCONSISTENT;
+  }
+
+  if (crypt_ftr.flags & CRYPT_DATA_CORRUPT){
+    SLOGE("Encryption is successful but data is corrupt\n");
+    return CRYPTO_COMPLETE_CORRUPT;
   }
 
   /* We passed the test! We shall diminish, and return to the west */
-  return 0;
+  return CRYPTO_COMPLETE_ENCRYPTED;
 }
 
-static int test_mount_encrypted_fs(char *passwd, char *mount_point, char *label)
+static int test_mount_encrypted_fs(struct crypt_mnt_ftr* crypt_ftr,
+                                   char *passwd, char *mount_point, char *label)
 {
-  struct crypt_mnt_ftr crypt_ftr;
   /* Allocate enough space for a 256 bit key, but we may use less */
   unsigned char decrypted_master_key[32];
   char crypto_blkdev[MAXPATHLEN];
   char real_blkdev[MAXPATHLEN];
   char tmp_mount_point[64];
   unsigned int orig_failed_decrypt_count;
-  char encrypted_state[PROPERTY_VALUE_MAX];
   int rc;
   kdf_func kdf;
   void *kdf_params;
+  int use_keymaster = 0;
+  int upgrade = 0;
+  unsigned char* intermediate_key = 0;
+  size_t intermediate_key_size = 0;
 
-  property_get("ro.crypto.state", encrypted_state, "");
-  if ( master_key_saved || strcmp(encrypted_state, "encrypted") ) {
-    SLOGE("encrypted fs already validated or not running with encryption, aborting");
-    return -1;
+  SLOGD("crypt_ftr->fs_size = %lld\n", crypt_ftr->fs_size);
+  orig_failed_decrypt_count = crypt_ftr->failed_decrypt_count;
+
+  if (! (crypt_ftr->flags & CRYPT_MNT_KEY_UNENCRYPTED) ) {
+    if (decrypt_master_key(passwd, decrypted_master_key, crypt_ftr,
+                           &intermediate_key, &intermediate_key_size)) {
+      SLOGE("Failed to decrypt master key\n");
+      rc = -1;
+      goto errout;
+    }
   }
 
   fs_mgr_get_crypt_info(fstab, 0, real_blkdev, sizeof(real_blkdev));
 
-  if (get_crypt_ftr_and_key(&crypt_ftr)) {
-    SLOGE("Error getting crypt footer and key\n");
-    return -1;
+  // Create crypto block device - all (non fatal) code paths
+  // need it
+  if (create_crypto_blk_dev(crypt_ftr, decrypted_master_key,
+                            real_blkdev, crypto_blkdev, label)) {
+     SLOGE("Error creating decrypted block device\n");
+     rc = -1;
+     goto errout;
   }
 
-  SLOGD("crypt_ftr->fs_size = %lld\n", crypt_ftr.fs_size);
-  orig_failed_decrypt_count = crypt_ftr.failed_decrypt_count;
+  /* Work out if the problem is the password or the data */
+  unsigned char scrypted_intermediate_key[sizeof(crypt_ftr->
+                                                 scrypted_intermediate_key)];
+  int N = 1 << crypt_ftr->N_factor;
+  int r = 1 << crypt_ftr->r_factor;
+  int p = 1 << crypt_ftr->p_factor;
 
-  if (! (crypt_ftr.flags & CRYPT_MNT_KEY_UNENCRYPTED) ) {
-    if (decrypt_master_key(passwd, decrypted_master_key, &crypt_ftr)) {
-      SLOGE("Failed to decrypt master key\n");
-      return -1;
+  rc = crypto_scrypt(intermediate_key, intermediate_key_size,
+                     crypt_ftr->salt, sizeof(crypt_ftr->salt),
+                     N, r, p, scrypted_intermediate_key,
+                     sizeof(scrypted_intermediate_key));
+
+  // Does the key match the crypto footer?
+  if (rc == 0 && memcmp(scrypted_intermediate_key,
+                        crypt_ftr->scrypted_intermediate_key,
+                        sizeof(scrypted_intermediate_key)) == 0) {
+    SLOGI("Password matches");
+    rc = 0;
+  } else {
+    /* Try mounting the file system anyway, just in case the problem's with
+     * the footer, not the key. */
+    sprintf(tmp_mount_point, "%s/tmp_mnt", mount_point);
+    mkdir(tmp_mount_point, 0755);
+    if (fs_mgr_do_mount(fstab, DATA_MNT_POINT, crypto_blkdev, tmp_mount_point)) {
+      SLOGE("Error temp mounting decrypted block device\n");
+      delete_crypto_blk_dev(label);
+
+      rc = ++crypt_ftr->failed_decrypt_count;
+      put_crypt_ftr_and_key(crypt_ftr);
+    } else {
+      /* Success! */
+      SLOGI("Password did not match but decrypted drive mounted - continue");
+      umount(tmp_mount_point);
+      rc = 0;
     }
   }
 
-  if (create_crypto_blk_dev(&crypt_ftr, decrypted_master_key,
-                               real_blkdev, crypto_blkdev, label)) {
-    SLOGE("Error creating decrypted block device\n");
-    return -1;
-  }
+  if (rc == 0) {
+    crypt_ftr->failed_decrypt_count = 0;
+    if (orig_failed_decrypt_count != 0) {
+      put_crypt_ftr_and_key(crypt_ftr);
+    }
 
-  /* If init detects an encrypted filesystem, it writes a file for each such
-   * encrypted fs into the tmpfs /data filesystem, and then the framework finds those
-   * files and passes that data to me */
-  /* Create a tmp mount point to try mounting the decryptd fs
-   * Since we're here, the mount_point should be a tmpfs filesystem, so make
-   * a directory in it to test mount the decrypted filesystem.
-   */
-  sprintf(tmp_mount_point, "%s/tmp_mnt", mount_point);
-  mkdir(tmp_mount_point, 0755);
-  if (fs_mgr_do_mount(fstab, DATA_MNT_POINT, crypto_blkdev, tmp_mount_point)) {
-    SLOGE("Error temp mounting decrypted block device\n");
-    delete_crypto_blk_dev(label);
-    crypt_ftr.failed_decrypt_count++;
-  } else {
-    /* Success, so just umount and we'll mount it properly when we restart
-     * the framework.
-     */
-    umount(tmp_mount_point);
-    crypt_ftr.failed_decrypt_count  = 0;
-  }
-
-  if (orig_failed_decrypt_count != crypt_ftr.failed_decrypt_count) {
-    put_crypt_ftr_and_key(&crypt_ftr);
-  }
-
-  if (crypt_ftr.failed_decrypt_count) {
-    /* We failed to mount the device, so return an error */
-    rc = crypt_ftr.failed_decrypt_count;
-
-  } else {
-    /* Woot!  Success!  Save the name of the crypto block device
-     * so we can mount it when restarting the framework.
-     */
+    /* Save the name of the crypto block device
+     * so we can mount it when restarting the framework. */
     property_set("ro.crypto.fs_crypto_blkdev", crypto_blkdev);
 
     /* Also save a the master key so we can reencrypted the key
-     * the key when we want to change the password on it.
-     */
+     * the key when we want to change the password on it. */
     memcpy(saved_master_key, decrypted_master_key, KEY_LEN_BYTES);
     saved_mount_point = strdup(mount_point);
     master_key_saved = 1;
     SLOGD("%s(): Master key saved\n", __FUNCTION__);
     rc = 0;
-    /*
-     * Upgrade if we're not using the latest KDF.
-     */
-    if (crypt_ftr.kdf_type != KDF_SCRYPT) {
-        crypt_ftr.kdf_type = KDF_SCRYPT;
-        rc = encrypt_master_key(passwd, crypt_ftr.salt, saved_master_key, crypt_ftr.master_key,
-                &crypt_ftr);
+
+    // Upgrade if we're not using the latest KDF.
+    use_keymaster = keymaster_check_compatibility();
+    if (crypt_ftr->kdf_type == KDF_SCRYPT_KEYMASTER) {
+        // Don't allow downgrade
+    } else if (use_keymaster == 1 && crypt_ftr->kdf_type != KDF_SCRYPT_KEYMASTER) {
+        crypt_ftr->kdf_type = KDF_SCRYPT_KEYMASTER;
+        upgrade = 1;
+    } else if (use_keymaster == 0 && crypt_ftr->kdf_type != KDF_SCRYPT) {
+        crypt_ftr->kdf_type = KDF_SCRYPT;
+        upgrade = 1;
+    }
+
+    if (upgrade) {
+        rc = encrypt_master_key(passwd, crypt_ftr->salt, saved_master_key,
+                                crypt_ftr->master_key, crypt_ftr);
         if (!rc) {
-            rc = put_crypt_ftr_and_key(&crypt_ftr);
+            rc = put_crypt_ftr_and_key(crypt_ftr);
         }
         SLOGD("Key Derivation Function upgrade: rc=%d\n", rc);
+
+        // Do not fail even if upgrade failed - machine is bootable
+        // Note that if this code is ever hit, there is a *serious* problem
+        // since KDFs should never fail. You *must* fix the kdf before
+        // proceeding!
+        if (rc) {
+          SLOGW("Upgrade failed with error %d,"
+                " but continuing with previous state",
+                rc);
+          rc = 0;
+        }
     }
   }
 
+ errout:
+  if (intermediate_key) {
+    memset(intermediate_key, 0, intermediate_key_size);
+    free(intermediate_key);
+  }
   return rc;
 }
 
@@ -1349,11 +1909,128 @@ int cryptfs_crypto_complete(void)
   return do_crypto_complete("/data");
 }
 
+int check_unmounted_and_get_ftr(struct crypt_mnt_ftr* crypt_ftr)
+{
+    char encrypted_state[PROPERTY_VALUE_MAX];
+    property_get("ro.crypto.state", encrypted_state, "");
+    if ( master_key_saved || strcmp(encrypted_state, "encrypted") ) {
+        SLOGE("encrypted fs already validated or not running with encryption,"
+              " aborting");
+        return -1;
+    }
+
+    if (get_crypt_ftr_and_key(crypt_ftr)) {
+        SLOGE("Error getting crypt footer and key");
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * TODO - transition patterns to new format in calling code
+ *        and remove this vile hack, and the use of hex in
+ *        the password passing code.
+ *
+ * Patterns are passed in zero based (i.e. the top left dot
+ * is represented by zero, the top middle one etc), but we want
+ * to store them '1' based.
+ * This is to allow us to migrate the calling code to use this
+ * convention. It also solves a nasty problem whereby scrypt ignores
+ * trailing zeros, so patterns ending at the top left could be
+ * truncated, and similarly, you could add the top left to any
+ * pattern and still match.
+ * adjust_passwd is a hack function that returns the alternate representation
+ * if the password appears to be a pattern (hex numbers all less than 09)
+ * If it succeeds we need to try both, and in particular try the alternate
+ * first. If the original matches, then we need to update the footer
+ * with the alternate.
+ * All code that accepts passwords must adjust them first. Since
+ * cryptfs_check_passwd is always the first function called after a migration
+ * (and indeed on any boot) we only need to do the double try in this
+ * function.
+ */
+char* adjust_passwd(const char* passwd)
+{
+    size_t index, length;
+
+    if (!passwd) {
+        return 0;
+    }
+
+    // Check even length. Hex encoded passwords are always
+    // an even length, since each character encodes to two characters.
+    length = strlen(passwd);
+    if (length % 2) {
+        SLOGW("Password not correctly hex encoded.");
+        return 0;
+    }
+
+    // Check password is old-style pattern - a collection of hex
+    // encoded bytes less than 9 (00 through 08)
+    for (index = 0; index < length; index +=2) {
+        if (passwd[index] != '0'
+            || passwd[index + 1] < '0' || passwd[index + 1] > '8') {
+            return 0;
+        }
+    }
+
+    // Allocate room for adjusted passwd and null terminate
+    char* adjusted = malloc(length + 1);
+    adjusted[length] = 0;
+
+    // Add 0x31 ('1') to each character
+    for (index = 0; index < length; index += 2) {
+        // output is 31 through 39 so set first byte to three, second to src + 1
+        adjusted[index] = '3';
+        adjusted[index + 1] = passwd[index + 1] + 1;
+    }
+
+    return adjusted;
+}
+
 int cryptfs_check_passwd(char *passwd)
 {
-    int rc = -1;
+    struct crypt_mnt_ftr crypt_ftr;
+    int rc;
 
-    rc = test_mount_encrypted_fs(passwd, DATA_MNT_POINT, "userdata");
+    rc = check_unmounted_and_get_ftr(&crypt_ftr);
+    if (rc)
+        return rc;
+
+    char* adjusted_passwd = adjust_passwd(passwd);
+    if (adjusted_passwd) {
+        int failed_decrypt_count = crypt_ftr.failed_decrypt_count;
+        rc = test_mount_encrypted_fs(&crypt_ftr, adjusted_passwd,
+                                     DATA_MNT_POINT, "userdata");
+
+        // Maybe the original one still works?
+        if (rc) {
+            // Don't double count this failure
+            crypt_ftr.failed_decrypt_count = failed_decrypt_count;
+            rc = test_mount_encrypted_fs(&crypt_ftr, passwd,
+                                         DATA_MNT_POINT, "userdata");
+            if (!rc) {
+                // cryptfs_changepw also adjusts so pass original
+                // Note that adjust_passwd only recognises patterns
+                // so we can safely use CRYPT_TYPE_PATTERN
+                SLOGI("Updating pattern to new format");
+                cryptfs_changepw(CRYPT_TYPE_PATTERN, passwd);
+            }
+        }
+        free(adjusted_passwd);
+    } else {
+        rc = test_mount_encrypted_fs(&crypt_ftr, passwd,
+                                     DATA_MNT_POINT, "userdata");
+    }
+
+    if (rc == 0 && crypt_ftr.crypt_type != CRYPT_TYPE_DEFAULT) {
+        cryptfs_clear_password();
+        password = strdup(passwd);
+        struct timespec now;
+        clock_gettime(CLOCK_BOOTTIME, &now);
+        password_expiry_time = now.tv_sec + password_max_age_seconds;
+    }
 
     return rc;
 }
@@ -1391,7 +2068,12 @@ int cryptfs_verify_passwd(char *passwd)
         /* If the device has no password, then just say the password is valid */
         rc = 0;
     } else {
-        decrypt_master_key(passwd, decrypted_master_key, &crypt_ftr);
+        char* adjusted_passwd = adjust_passwd(passwd);
+        if (adjusted_passwd) {
+            passwd = adjusted_passwd;
+        }
+
+        decrypt_master_key(passwd, decrypted_master_key, &crypt_ftr, 0, 0);
         if (!memcmp(decrypted_master_key, saved_master_key, crypt_ftr.keysize)) {
             /* They match, the password is correct */
             rc = 0;
@@ -1400,6 +2082,8 @@ int cryptfs_verify_passwd(char *passwd)
             sleep(1);
             rc = 1;
         }
+
+        free(adjusted_passwd);
     }
 
     return rc;
@@ -1410,7 +2094,7 @@ int cryptfs_verify_passwd(char *passwd)
  * Presumably, at a minimum, the caller will update the
  * filesystem size and crypto_type_name after calling this function.
  */
-static void cryptfs_init_crypt_mnt_ftr(struct crypt_mnt_ftr *ftr)
+static int cryptfs_init_crypt_mnt_ftr(struct crypt_mnt_ftr *ftr)
 {
     off64_t off;
 
@@ -1421,7 +2105,20 @@ static void cryptfs_init_crypt_mnt_ftr(struct crypt_mnt_ftr *ftr)
     ftr->ftr_size = sizeof(struct crypt_mnt_ftr);
     ftr->keysize = KEY_LEN_BYTES;
 
-    ftr->kdf_type = KDF_SCRYPT;
+    switch (keymaster_check_compatibility()) {
+    case 1:
+        ftr->kdf_type = KDF_SCRYPT_KEYMASTER;
+        break;
+
+    case 0:
+        ftr->kdf_type = KDF_SCRYPT;
+        break;
+
+    default:
+        SLOGE("keymaster_check_compatibility failed");
+        return -1;
+    }
+
     get_device_scrypt_params(ftr);
 
     ftr->persist_data_size = CRYPT_PERSIST_DATA_SIZE;
@@ -1430,6 +2127,8 @@ static void cryptfs_init_crypt_mnt_ftr(struct crypt_mnt_ftr *ftr)
         ftr->persist_data_offset[1] = off + CRYPT_FOOTER_TO_PERSIST_OFFSET +
                                     ftr->persist_data_size;
     }
+
+    return 0;
 }
 
 static int cryptfs_enable_wipe(char *crypto_blkdev, off64_t size, int type)
@@ -1446,28 +2145,22 @@ static int cryptfs_enable_wipe(char *crypto_blkdev, off64_t size, int type)
         args[1] = "-a";
         args[2] = "/data";
         args[3] = "-l";
-        snprintf(size_str, sizeof(size_str), "%lld", size * 512);
+        snprintf(size_str, sizeof(size_str), "%" PRId64, size * 512);
         args[4] = size_str;
         args[5] = crypto_blkdev;
         num_args = 6;
         SLOGI("Making empty filesystem with command %s %s %s %s %s %s\n",
               args[0], args[1], args[2], args[3], args[4], args[5]);
-    } else if (type== FAT_FS) {
-        args[0] = "/system/bin/newfs_msdos";
-        args[1] = "-F";
-        args[2] = "32";
-        args[3] = "-O";
-        args[4] = "android";
-        args[5] = "-c";
-        args[6] = "8";
-        args[7] = "-s";
-        snprintf(size_str, sizeof(size_str), "%lld", size);
-        args[8] = size_str;
-        args[9] = crypto_blkdev;
-        num_args = 10;
-        SLOGI("Making empty filesystem with command %s %s %s %s %s %s %s %s %s %s\n",
-              args[0], args[1], args[2], args[3], args[4], args[5],
-              args[6], args[7], args[8], args[9]);
+    } else if (type == F2FS_FS) {
+        args[0] = "/system/bin/mkfs.f2fs";
+        args[1] = "-t";
+        args[2] = "-d1";
+        args[3] = crypto_blkdev;
+        snprintf(size_str, sizeof(size_str), "%" PRId64, size);
+        args[4] = size_str;
+        num_args = 5;
+        SLOGI("Making empty filesystem with command %s %s %s %s %s\n",
+              args[0], args[1], args[2], args[3], args[4]);
     } else {
         SLOGE("cryptfs_enable_wipe(): unknown filesystem type %d\n", type);
         return -1;
@@ -1495,26 +2188,455 @@ static int cryptfs_enable_wipe(char *crypto_blkdev, off64_t size, int type)
 }
 
 #define CRYPT_INPLACE_BUFSIZE 4096
-#define CRYPT_SECTORS_PER_BUFSIZE (CRYPT_INPLACE_BUFSIZE / 512)
-static int cryptfs_enable_inplace(char *crypto_blkdev, char *real_blkdev, off64_t size,
-                                  off64_t *size_already_done, off64_t tot_size)
+#define CRYPT_SECTORS_PER_BUFSIZE (CRYPT_INPLACE_BUFSIZE / CRYPT_SECTOR_SIZE)
+#define CRYPT_SECTOR_SIZE 512
+
+/* aligned 32K writes tends to make flash happy.
+ * SD card association recommends it.
+ */
+#define BLOCKS_AT_A_TIME 8
+
+struct encryptGroupsData
+{
+    int realfd;
+    int cryptofd;
+    off64_t numblocks;
+    off64_t one_pct, cur_pct, new_pct;
+    off64_t blocks_already_done, tot_numblocks;
+    off64_t used_blocks_already_done, tot_used_blocks;
+    char* real_blkdev, * crypto_blkdev;
+    int count;
+    off64_t offset;
+    char* buffer;
+    off64_t last_written_sector;
+    int completed;
+    time_t time_started;
+    int remaining_time;
+};
+
+static void update_progress(struct encryptGroupsData* data, int is_used)
+{
+    data->blocks_already_done++;
+
+    if (is_used) {
+        data->used_blocks_already_done++;
+    }
+    if (data->tot_used_blocks) {
+        data->new_pct = data->used_blocks_already_done / data->one_pct;
+    } else {
+        data->new_pct = data->blocks_already_done / data->one_pct;
+    }
+
+    if (data->new_pct > data->cur_pct) {
+        char buf[8];
+        data->cur_pct = data->new_pct;
+        snprintf(buf, sizeof(buf), "%" PRId64, data->cur_pct);
+        property_set("vold.encrypt_progress", buf);
+    }
+
+    if (data->cur_pct >= 5) {
+        struct timespec time_now;
+        if (clock_gettime(CLOCK_MONOTONIC, &time_now)) {
+            SLOGW("Error getting time");
+        } else {
+            double elapsed_time = difftime(time_now.tv_sec, data->time_started);
+            off64_t remaining_blocks = data->tot_used_blocks
+                                       - data->used_blocks_already_done;
+            int remaining_time = (int)(elapsed_time * remaining_blocks
+                                       / data->used_blocks_already_done);
+
+            // Change time only if not yet set, lower, or a lot higher for
+            // best user experience
+            if (data->remaining_time == -1
+                || remaining_time < data->remaining_time
+                || remaining_time > data->remaining_time + 60) {
+                char buf[8];
+                snprintf(buf, sizeof(buf), "%d", remaining_time);
+                property_set("vold.encrypt_time_remaining", buf);
+                data->remaining_time = remaining_time;
+            }
+        }
+    }
+}
+
+static void log_progress(struct encryptGroupsData const* data, bool completed)
+{
+    // Precondition - if completed data = 0 else data != 0
+
+    // Track progress so we can skip logging blocks
+    static off64_t offset = -1;
+
+    // Need to close existing 'Encrypting from' log?
+    if (completed || (offset != -1 && data->offset != offset)) {
+        SLOGI("Encrypted to sector %" PRId64,
+              offset / info.block_size * CRYPT_SECTOR_SIZE);
+        offset = -1;
+    }
+
+    // Need to start new 'Encrypting from' log?
+    if (!completed && offset != data->offset) {
+        SLOGI("Encrypting from sector %" PRId64,
+              data->offset / info.block_size * CRYPT_SECTOR_SIZE);
+    }
+
+    // Update offset
+    if (!completed) {
+        offset = data->offset + (off64_t)data->count * info.block_size;
+    }
+}
+
+static int flush_outstanding_data(struct encryptGroupsData* data)
+{
+    if (data->count == 0) {
+        return 0;
+    }
+
+    SLOGV("Copying %d blocks at offset %" PRIx64, data->count, data->offset);
+
+    if (pread64(data->realfd, data->buffer,
+                info.block_size * data->count, data->offset)
+        <= 0) {
+        SLOGE("Error reading real_blkdev %s for inplace encrypt",
+              data->real_blkdev);
+        return -1;
+    }
+
+    if (pwrite64(data->cryptofd, data->buffer,
+                 info.block_size * data->count, data->offset)
+        <= 0) {
+        SLOGE("Error writing crypto_blkdev %s for inplace encrypt",
+              data->crypto_blkdev);
+        return -1;
+    } else {
+      log_progress(data, false);
+    }
+
+    data->count = 0;
+    data->last_written_sector = (data->offset + data->count)
+                                / info.block_size * CRYPT_SECTOR_SIZE - 1;
+    return 0;
+}
+
+static int encrypt_groups(struct encryptGroupsData* data)
+{
+    unsigned int i;
+    u8 *block_bitmap = 0;
+    unsigned int block;
+    off64_t ret;
+    int rc = -1;
+
+    data->buffer = malloc(info.block_size * BLOCKS_AT_A_TIME);
+    if (!data->buffer) {
+        SLOGE("Failed to allocate crypto buffer");
+        goto errout;
+    }
+
+    block_bitmap = malloc(info.block_size);
+    if (!block_bitmap) {
+        SLOGE("failed to allocate block bitmap");
+        goto errout;
+    }
+
+    for (i = 0; i < aux_info.groups; ++i) {
+        SLOGI("Encrypting group %d", i);
+
+        u32 first_block = aux_info.first_data_block + i * info.blocks_per_group;
+        u32 block_count = min(info.blocks_per_group,
+                             aux_info.len_blocks - first_block);
+
+        off64_t offset = (u64)info.block_size
+                         * aux_info.bg_desc[i].bg_block_bitmap;
+
+        ret = pread64(data->realfd, block_bitmap, info.block_size, offset);
+        if (ret != (int)info.block_size) {
+            SLOGE("failed to read all of block group bitmap %d", i);
+            goto errout;
+        }
+
+        offset = (u64)info.block_size * first_block;
+
+        data->count = 0;
+
+        for (block = 0; block < block_count; block++) {
+            int used = bitmap_get_bit(block_bitmap, block);
+            update_progress(data, used);
+            if (used) {
+                if (data->count == 0) {
+                    data->offset = offset;
+                }
+                data->count++;
+            } else {
+                if (flush_outstanding_data(data)) {
+                    goto errout;
+                }
+            }
+
+            offset += info.block_size;
+
+            /* Write data if we are aligned or buffer size reached */
+            if (offset % (info.block_size * BLOCKS_AT_A_TIME) == 0
+                || data->count == BLOCKS_AT_A_TIME) {
+                if (flush_outstanding_data(data)) {
+                    goto errout;
+                }
+            }
+
+            if (!is_battery_ok_to_continue()) {
+                SLOGE("Stopping encryption due to low battery");
+                rc = 0;
+                goto errout;
+            }
+
+        }
+        if (flush_outstanding_data(data)) {
+            goto errout;
+        }
+    }
+
+    data->completed = 1;
+    rc = 0;
+
+errout:
+    log_progress(0, true);
+    free(data->buffer);
+    free(block_bitmap);
+    return rc;
+}
+
+static int cryptfs_enable_inplace_ext4(char *crypto_blkdev,
+                                       char *real_blkdev,
+                                       off64_t size,
+                                       off64_t *size_already_done,
+                                       off64_t tot_size,
+                                       off64_t previously_encrypted_upto)
+{
+    u32 i;
+    struct encryptGroupsData data;
+    int rc; // Can't initialize without causing warning -Wclobbered
+
+    if (previously_encrypted_upto > *size_already_done) {
+        SLOGD("Not fast encrypting since resuming part way through");
+        return -1;
+    }
+
+    memset(&data, 0, sizeof(data));
+    data.real_blkdev = real_blkdev;
+    data.crypto_blkdev = crypto_blkdev;
+
+    if ( (data.realfd = open(real_blkdev, O_RDWR)) < 0) {
+        SLOGE("Error opening real_blkdev %s for inplace encrypt. err=%d(%s)\n",
+              real_blkdev, errno, strerror(errno));
+        rc = -1;
+        goto errout;
+    }
+
+    if ( (data.cryptofd = open(crypto_blkdev, O_WRONLY)) < 0) {
+        SLOGE("Error opening crypto_blkdev %s for ext4 inplace encrypt. err=%d(%s)\n",
+              crypto_blkdev, errno, strerror(errno));
+        rc = ENABLE_INPLACE_ERR_DEV;
+        goto errout;
+    }
+
+    if (setjmp(setjmp_env)) {
+        SLOGE("Reading ext4 extent caused an exception\n");
+        rc = -1;
+        goto errout;
+    }
+
+    if (read_ext(data.realfd, 0) != 0) {
+        SLOGE("Failed to read ext4 extent\n");
+        rc = -1;
+        goto errout;
+    }
+
+    data.numblocks = size / CRYPT_SECTORS_PER_BUFSIZE;
+    data.tot_numblocks = tot_size / CRYPT_SECTORS_PER_BUFSIZE;
+    data.blocks_already_done = *size_already_done / CRYPT_SECTORS_PER_BUFSIZE;
+
+    SLOGI("Encrypting ext4 filesystem in place...");
+
+    data.tot_used_blocks = data.numblocks;
+    for (i = 0; i < aux_info.groups; ++i) {
+      data.tot_used_blocks -= aux_info.bg_desc[i].bg_free_blocks_count;
+    }
+
+    data.one_pct = data.tot_used_blocks / 100;
+    data.cur_pct = 0;
+
+    struct timespec time_started = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &time_started)) {
+        SLOGW("Error getting time at start");
+        // Note - continue anyway - we'll run with 0
+    }
+    data.time_started = time_started.tv_sec;
+    data.remaining_time = -1;
+
+    rc = encrypt_groups(&data);
+    if (rc) {
+        SLOGE("Error encrypting groups");
+        goto errout;
+    }
+
+    *size_already_done += data.completed ? size : data.last_written_sector;
+    rc = 0;
+
+errout:
+    close(data.realfd);
+    close(data.cryptofd);
+
+    return rc;
+}
+
+static void log_progress_f2fs(u64 block, bool completed)
+{
+    // Precondition - if completed data = 0 else data != 0
+
+    // Track progress so we can skip logging blocks
+    static u64 last_block = (u64)-1;
+
+    // Need to close existing 'Encrypting from' log?
+    if (completed || (last_block != (u64)-1 && block != last_block + 1)) {
+        SLOGI("Encrypted to block %" PRId64, last_block);
+        last_block = -1;
+    }
+
+    // Need to start new 'Encrypting from' log?
+    if (!completed && (last_block == (u64)-1 || block != last_block + 1)) {
+        SLOGI("Encrypting from block %" PRId64, block);
+    }
+
+    // Update offset
+    if (!completed) {
+        last_block = block;
+    }
+}
+
+static int encrypt_one_block_f2fs(u64 pos, void *data)
+{
+    struct encryptGroupsData *priv_dat = (struct encryptGroupsData *)data;
+
+    priv_dat->blocks_already_done = pos - 1;
+    update_progress(priv_dat, 1);
+
+    off64_t offset = pos * CRYPT_INPLACE_BUFSIZE;
+
+    if (pread64(priv_dat->realfd, priv_dat->buffer, CRYPT_INPLACE_BUFSIZE, offset) <= 0) {
+        SLOGE("Error reading real_blkdev %s for f2fs inplace encrypt", priv_dat->crypto_blkdev);
+        return -1;
+    }
+
+    if (pwrite64(priv_dat->cryptofd, priv_dat->buffer, CRYPT_INPLACE_BUFSIZE, offset) <= 0) {
+        SLOGE("Error writing crypto_blkdev %s for f2fs inplace encrypt", priv_dat->crypto_blkdev);
+        return -1;
+    } else {
+        log_progress_f2fs(pos, false);
+    }
+
+    return 0;
+}
+
+static int cryptfs_enable_inplace_f2fs(char *crypto_blkdev,
+                                       char *real_blkdev,
+                                       off64_t size,
+                                       off64_t *size_already_done,
+                                       off64_t tot_size,
+                                       off64_t previously_encrypted_upto)
+{
+    u32 i;
+    struct encryptGroupsData data;
+    struct f2fs_info *f2fs_info = NULL;
+    int rc = ENABLE_INPLACE_ERR_OTHER;
+    if (previously_encrypted_upto > *size_already_done) {
+        SLOGD("Not fast encrypting since resuming part way through");
+        return ENABLE_INPLACE_ERR_OTHER;
+    }
+    memset(&data, 0, sizeof(data));
+    data.real_blkdev = real_blkdev;
+    data.crypto_blkdev = crypto_blkdev;
+    data.realfd = -1;
+    data.cryptofd = -1;
+    if ( (data.realfd = open64(real_blkdev, O_RDWR)) < 0) {
+        SLOGE("Error opening real_blkdev %s for f2fs inplace encrypt\n",
+              real_blkdev);
+        goto errout;
+    }
+    if ( (data.cryptofd = open64(crypto_blkdev, O_WRONLY)) < 0) {
+        SLOGE("Error opening crypto_blkdev %s for f2fs inplace encrypt. err=%d(%s)\n",
+              crypto_blkdev, errno, strerror(errno));
+        rc = ENABLE_INPLACE_ERR_DEV;
+        goto errout;
+    }
+
+    f2fs_info = generate_f2fs_info(data.realfd);
+    if (!f2fs_info)
+      goto errout;
+
+    data.numblocks = size / CRYPT_SECTORS_PER_BUFSIZE;
+    data.tot_numblocks = tot_size / CRYPT_SECTORS_PER_BUFSIZE;
+    data.blocks_already_done = *size_already_done / CRYPT_SECTORS_PER_BUFSIZE;
+
+    data.tot_used_blocks = get_num_blocks_used(f2fs_info);
+
+    data.one_pct = data.tot_used_blocks / 100;
+    data.cur_pct = 0;
+    data.time_started = time(NULL);
+    data.remaining_time = -1;
+
+    data.buffer = malloc(f2fs_info->block_size);
+    if (!data.buffer) {
+        SLOGE("Failed to allocate crypto buffer");
+        goto errout;
+    }
+
+    data.count = 0;
+
+    /* Currently, this either runs to completion, or hits a nonrecoverable error */
+    rc = run_on_used_blocks(data.blocks_already_done, f2fs_info, &encrypt_one_block_f2fs, &data);
+
+    if (rc) {
+        SLOGE("Error in running over f2fs blocks");
+        rc = ENABLE_INPLACE_ERR_OTHER;
+        goto errout;
+    }
+
+    *size_already_done += size;
+    rc = 0;
+
+errout:
+    if (rc)
+        SLOGE("Failed to encrypt f2fs filesystem on %s", real_blkdev);
+
+    log_progress_f2fs(0, true);
+    free(f2fs_info);
+    free(data.buffer);
+    close(data.realfd);
+    close(data.cryptofd);
+
+    return rc;
+}
+
+static int cryptfs_enable_inplace_full(char *crypto_blkdev, char *real_blkdev,
+                                       off64_t size, off64_t *size_already_done,
+                                       off64_t tot_size,
+                                       off64_t previously_encrypted_upto)
 {
     int realfd, cryptofd;
     char *buf[CRYPT_INPLACE_BUFSIZE];
-    int rc = -1;
+    int rc = ENABLE_INPLACE_ERR_OTHER;
     off64_t numblocks, i, remainder;
     off64_t one_pct, cur_pct, new_pct;
     off64_t blocks_already_done, tot_numblocks;
 
     if ( (realfd = open(real_blkdev, O_RDONLY)) < 0) { 
         SLOGE("Error opening real_blkdev %s for inplace encrypt\n", real_blkdev);
-        return -1;
+        return ENABLE_INPLACE_ERR_OTHER;
     }
 
     if ( (cryptofd = open(crypto_blkdev, O_WRONLY)) < 0) { 
-        SLOGE("Error opening crypto_blkdev %s for inplace encrypt\n", crypto_blkdev);
+        SLOGE("Error opening crypto_blkdev %s for inplace encrypt. err=%d(%s)\n",
+              crypto_blkdev, errno, strerror(errno));
         close(realfd);
-        return -1;
+        return ENABLE_INPLACE_ERR_DEV;
     }
 
     /* This is pretty much a simple loop of reading 4K, and writing 4K.
@@ -1529,37 +2651,77 @@ static int cryptfs_enable_inplace(char *crypto_blkdev, char *real_blkdev, off64_
 
     SLOGE("Encrypting filesystem in place...");
 
+    i = previously_encrypted_upto + 1 - *size_already_done;
+
+    if (lseek64(realfd, i * CRYPT_SECTOR_SIZE, SEEK_SET) < 0) {
+        SLOGE("Cannot seek to previously encrypted point on %s", real_blkdev);
+        goto errout;
+    }
+
+    if (lseek64(cryptofd, i * CRYPT_SECTOR_SIZE, SEEK_SET) < 0) {
+        SLOGE("Cannot seek to previously encrypted point on %s", crypto_blkdev);
+        goto errout;
+    }
+
+    for (;i < size && i % CRYPT_SECTORS_PER_BUFSIZE != 0; ++i) {
+        if (unix_read(realfd, buf, CRYPT_SECTOR_SIZE) <= 0) {
+            SLOGE("Error reading initial sectors from real_blkdev %s for "
+                  "inplace encrypt\n", crypto_blkdev);
+            goto errout;
+        }
+        if (unix_write(cryptofd, buf, CRYPT_SECTOR_SIZE) <= 0) {
+            SLOGE("Error writing initial sectors to crypto_blkdev %s for "
+                  "inplace encrypt\n", crypto_blkdev);
+            goto errout;
+        } else {
+            SLOGI("Encrypted 1 block at %" PRId64, i);
+        }
+    }
+
     one_pct = tot_numblocks / 100;
     cur_pct = 0;
     /* process the majority of the filesystem in blocks */
-    for (i=0; i<numblocks; i++) {
+    for (i/=CRYPT_SECTORS_PER_BUFSIZE; i<numblocks; i++) {
         new_pct = (i + blocks_already_done) / one_pct;
         if (new_pct > cur_pct) {
             char buf[8];
 
             cur_pct = new_pct;
-            snprintf(buf, sizeof(buf), "%lld", cur_pct);
+            snprintf(buf, sizeof(buf), "%" PRId64, cur_pct);
             property_set("vold.encrypt_progress", buf);
         }
         if (unix_read(realfd, buf, CRYPT_INPLACE_BUFSIZE) <= 0) {
-            SLOGE("Error reading real_blkdev %s for inplace encrypt\n", crypto_blkdev);
+            SLOGE("Error reading real_blkdev %s for inplace encrypt", crypto_blkdev);
             goto errout;
         }
         if (unix_write(cryptofd, buf, CRYPT_INPLACE_BUFSIZE) <= 0) {
-            SLOGE("Error writing crypto_blkdev %s for inplace encrypt\n", crypto_blkdev);
+            SLOGE("Error writing crypto_blkdev %s for inplace encrypt", crypto_blkdev);
+            goto errout;
+        } else {
+            SLOGD("Encrypted %d block at %" PRId64,
+                  CRYPT_SECTORS_PER_BUFSIZE,
+                  i * CRYPT_SECTORS_PER_BUFSIZE);
+        }
+
+       if (!is_battery_ok_to_continue()) {
+            SLOGE("Stopping encryption due to low battery");
+            *size_already_done += (i + 1) * CRYPT_SECTORS_PER_BUFSIZE - 1;
+            rc = 0;
             goto errout;
         }
     }
 
     /* Do any remaining sectors */
     for (i=0; i<remainder; i++) {
-        if (unix_read(realfd, buf, 512) <= 0) {
-            SLOGE("Error reading rival sectors from real_blkdev %s for inplace encrypt\n", crypto_blkdev);
+        if (unix_read(realfd, buf, CRYPT_SECTOR_SIZE) <= 0) {
+            SLOGE("Error reading final sectors from real_blkdev %s for inplace encrypt", crypto_blkdev);
             goto errout;
         }
-        if (unix_write(cryptofd, buf, 512) <= 0) {
-            SLOGE("Error writing final sectors to crypto_blkdev %s for inplace encrypt\n", crypto_blkdev);
+        if (unix_write(cryptofd, buf, CRYPT_SECTOR_SIZE) <= 0) {
+            SLOGE("Error writing final sectors to crypto_blkdev %s for inplace encrypt", crypto_blkdev);
             goto errout;
+        } else {
+            SLOGI("Encrypted 1 block at next location");
         }
     }
 
@@ -1573,6 +2735,54 @@ errout:
     return rc;
 }
 
+/* returns on of the ENABLE_INPLACE_* return codes */
+static int cryptfs_enable_inplace(char *crypto_blkdev, char *real_blkdev,
+                                  off64_t size, off64_t *size_already_done,
+                                  off64_t tot_size,
+                                  off64_t previously_encrypted_upto)
+{
+    int rc_ext4, rc_f2fs, rc_full;
+    if (previously_encrypted_upto) {
+        SLOGD("Continuing encryption from %" PRId64, previously_encrypted_upto);
+    }
+
+    if (*size_already_done + size < previously_encrypted_upto) {
+        *size_already_done += size;
+        return 0;
+    }
+
+    /* TODO: identify filesystem type.
+     * As is, cryptfs_enable_inplace_ext4 will fail on an f2fs partition, and
+     * then we will drop down to cryptfs_enable_inplace_f2fs.
+     * */
+    if ((rc_ext4 = cryptfs_enable_inplace_ext4(crypto_blkdev, real_blkdev,
+                                size, size_already_done,
+                                tot_size, previously_encrypted_upto)) == 0) {
+      return 0;
+    }
+    SLOGD("cryptfs_enable_inplace_ext4()=%d\n", rc_ext4);
+
+    if ((rc_f2fs = cryptfs_enable_inplace_f2fs(crypto_blkdev, real_blkdev,
+                                size, size_already_done,
+                                tot_size, previously_encrypted_upto)) == 0) {
+      return 0;
+    }
+    SLOGD("cryptfs_enable_inplace_f2fs()=%d\n", rc_f2fs);
+
+    rc_full = cryptfs_enable_inplace_full(crypto_blkdev, real_blkdev,
+                                       size, size_already_done, tot_size,
+                                       previously_encrypted_upto);
+    SLOGD("cryptfs_enable_inplace_full()=%d\n", rc_full);
+
+    /* Hack for b/17898962, the following is the symptom... */
+    if (rc_ext4 == ENABLE_INPLACE_ERR_DEV
+        && rc_f2fs == ENABLE_INPLACE_ERR_DEV
+        && rc_full == ENABLE_INPLACE_ERR_DEV) {
+            return ENABLE_INPLACE_ERR_DEV;
+    }
+    return rc_full;
+}
+
 #define CRYPTO_ENABLE_WIPE 1
 #define CRYPTO_ENABLE_INPLACE 2
 
@@ -1580,37 +2790,118 @@ errout:
 
 static inline int should_encrypt(struct volume_info *volume)
 {
-    return (volume->flags & (VOL_ENCRYPTABLE | VOL_NONREMOVABLE)) == 
+    return (volume->flags & (VOL_ENCRYPTABLE | VOL_NONREMOVABLE)) ==
             (VOL_ENCRYPTABLE | VOL_NONREMOVABLE);
 }
 
-int cryptfs_enable(char *howarg, char *passwd)
+static int cryptfs_SHA256_fileblock(const char* filename, __le8* buf)
+{
+    int fd = open(filename, O_RDONLY);
+    if (fd == -1) {
+        SLOGE("Error opening file %s", filename);
+        return -1;
+    }
+
+    char block[CRYPT_INPLACE_BUFSIZE];
+    memset(block, 0, sizeof(block));
+    if (unix_read(fd, block, sizeof(block)) < 0) {
+        SLOGE("Error reading file %s", filename);
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+
+    SHA256_CTX c;
+    SHA256_Init(&c);
+    SHA256_Update(&c, block, sizeof(block));
+    SHA256_Final(buf, &c);
+
+    return 0;
+}
+
+static int get_fs_type(struct fstab_rec *rec)
+{
+    if (!strcmp(rec->fs_type, "ext4")) {
+        return EXT4_FS;
+    } else if (!strcmp(rec->fs_type, "f2fs")) {
+        return F2FS_FS;
+    } else {
+        return -1;
+    }
+}
+
+static int cryptfs_enable_all_volumes(struct crypt_mnt_ftr *crypt_ftr, int how,
+                                      char *crypto_blkdev, char *real_blkdev,
+                                      int previously_encrypted_upto)
+{
+    off64_t cur_encryption_done=0, tot_encryption_size=0;
+    int i, rc = -1;
+
+    if (!is_battery_ok_to_start()) {
+        SLOGW("Not starting encryption due to low battery");
+        return 0;
+    }
+
+    /* The size of the userdata partition, and add in the vold volumes below */
+    tot_encryption_size = crypt_ftr->fs_size;
+
+    if (how == CRYPTO_ENABLE_WIPE) {
+        struct fstab_rec* rec = fs_mgr_get_entry_for_mount_point(fstab, DATA_MNT_POINT);
+        int fs_type = get_fs_type(rec);
+        if (fs_type < 0) {
+            SLOGE("cryptfs_enable: unsupported fs type %s\n", rec->fs_type);
+            return -1;
+        }
+        rc = cryptfs_enable_wipe(crypto_blkdev, crypt_ftr->fs_size, fs_type);
+    } else if (how == CRYPTO_ENABLE_INPLACE) {
+        rc = cryptfs_enable_inplace(crypto_blkdev, real_blkdev,
+                                    crypt_ftr->fs_size, &cur_encryption_done,
+                                    tot_encryption_size,
+                                    previously_encrypted_upto);
+
+        if (rc == ENABLE_INPLACE_ERR_DEV) {
+            /* Hack for b/17898962 */
+            SLOGE("cryptfs_enable: crypto block dev failure. Must reboot...\n");
+            cryptfs_reboot(reboot);
+        }
+
+        if (!rc) {
+            crypt_ftr->encrypted_upto = cur_encryption_done;
+        }
+
+        if (!rc && crypt_ftr->encrypted_upto == crypt_ftr->fs_size) {
+            /* The inplace routine never actually sets the progress to 100% due
+             * to the round down nature of integer division, so set it here */
+            property_set("vold.encrypt_progress", "100");
+        }
+    } else {
+        /* Shouldn't happen */
+        SLOGE("cryptfs_enable: internal error, unknown option\n");
+        rc = -1;
+    }
+
+    return rc;
+}
+
+int cryptfs_enable_internal(char *howarg, int crypt_type, char *passwd,
+                            int allow_reboot)
 {
     int how = 0;
-    char crypto_blkdev[MAXPATHLEN], real_blkdev[MAXPATHLEN], sd_crypto_blkdev[MAXPATHLEN];
+    char crypto_blkdev[MAXPATHLEN], real_blkdev[MAXPATHLEN];
     unsigned long nr_sec;
     unsigned char decrypted_master_key[KEY_LEN_BYTES];
     int rc=-1, fd, i, ret;
-    struct crypt_mnt_ftr crypt_ftr, sd_crypt_ftr;;
+    struct crypt_mnt_ftr crypt_ftr;
     struct crypt_persist_data *pdata;
-    char tmpfs_options[PROPERTY_VALUE_MAX];
     char encrypted_state[PROPERTY_VALUE_MAX];
     char lockid[32] = { 0 };
     char key_loc[PROPERTY_VALUE_MAX];
     char fuse_sdcard[PROPERTY_VALUE_MAX];
     char *sd_mnt_point;
-    char sd_blk_dev[256] = { 0 };
     int num_vols;
     struct volume_info *vol_list = 0;
-    off64_t cur_encryption_done=0, tot_encryption_size=0;
-
-    property_get("ro.crypto.state", encrypted_state, "");
-    if (strcmp(encrypted_state, "unencrypted")) {
-        SLOGE("Device is already running encrypted, aborting");
-        goto error_unencrypted;
-    }
-
-    fs_mgr_get_crypt_info(fstab, key_loc, 0, sizeof(key_loc));
+    off64_t previously_encrypted_upto = 0;
 
     if (!strcmp(howarg, "wipe")) {
       how = CRYPTO_ENABLE_WIPE;
@@ -1621,6 +2912,31 @@ int cryptfs_enable(char *howarg, char *passwd)
       goto error_unencrypted;
     }
 
+    /* See if an encryption was underway and interrupted */
+    if (how == CRYPTO_ENABLE_INPLACE
+          && get_crypt_ftr_and_key(&crypt_ftr) == 0
+          && (crypt_ftr.flags & CRYPT_ENCRYPTION_IN_PROGRESS)) {
+        previously_encrypted_upto = crypt_ftr.encrypted_upto;
+        crypt_ftr.encrypted_upto = 0;
+        crypt_ftr.flags &= ~CRYPT_ENCRYPTION_IN_PROGRESS;
+
+        /* At this point, we are in an inconsistent state. Until we successfully
+           complete encryption, a reboot will leave us broken. So mark the
+           encryption failed in case that happens.
+           On successfully completing encryption, remove this flag */
+        crypt_ftr.flags |= CRYPT_INCONSISTENT_STATE;
+
+        put_crypt_ftr_and_key(&crypt_ftr);
+    }
+
+    property_get("ro.crypto.state", encrypted_state, "");
+    if (!strcmp(encrypted_state, "encrypted") && !previously_encrypted_upto) {
+        SLOGE("Device is already running encrypted, aborting");
+        goto error_unencrypted;
+    }
+
+    // TODO refactor fs_mgr_get_crypt_info to get both in one call
+    fs_mgr_get_crypt_info(fstab, key_loc, 0, sizeof(key_loc));
     fs_mgr_get_crypt_info(fstab, 0, real_blkdev, sizeof(real_blkdev));
 
     /* Get the size of the real block device */
@@ -1634,9 +2950,11 @@ int cryptfs_enable(char *howarg, char *passwd)
     /* If doing inplace encryption, make sure the orig fs doesn't include the crypto footer */
     if ((how == CRYPTO_ENABLE_INPLACE) && (!strcmp(key_loc, KEY_IN_FOOTER))) {
         unsigned int fs_size_sec, max_fs_size_sec;
-
         fs_size_sec = get_fs_size(real_blkdev);
-        max_fs_size_sec = nr_sec - (CRYPT_FOOTER_OFFSET / 512);
+        if (fs_size_sec == 0)
+            fs_size_sec = get_f2fs_filesystem_size_sec(real_blkdev);
+
+        max_fs_size_sec = nr_sec - (CRYPT_FOOTER_OFFSET / CRYPT_SECTOR_SIZE);
 
         if (fs_size_sec > max_fs_size_sec) {
             SLOGE("Orig filesystem overlaps crypto footer region.  Cannot encrypt in place.");
@@ -1660,26 +2978,19 @@ int cryptfs_enable(char *howarg, char *passwd)
         sd_mnt_point = "/mnt/sdcard";
     }
 
+    /* TODO
+     * Currently do not have test devices with multiple encryptable volumes.
+     * When we acquire some, re-add support.
+     */
     num_vols=vold_getNumDirectVolumes();
     vol_list = malloc(sizeof(struct volume_info) * num_vols);
     vold_getDirectVolumeList(vol_list);
 
     for (i=0; i<num_vols; i++) {
         if (should_encrypt(&vol_list[i])) {
-            fd = open(vol_list[i].blk_dev, O_RDONLY);
-            if ( (vol_list[i].size = get_blkdev_size(fd)) == 0) {
-                SLOGE("Cannot get size of block device %s\n", vol_list[i].blk_dev);
-                goto error_unencrypted;
-            }
-            close(fd);
-
-            ret=vold_disableVol(vol_list[i].label);
-            if ((ret < 0) && (ret != UNMOUNT_NOT_MOUNTED_ERR)) {
-                /* -2 is returned when the device exists but is not currently mounted.
-                 * ignore the error and continue. */
-                SLOGE("Failed to unmount volume %s\n", vol_list[i].label);
-                goto error_unencrypted;
-            }
+            SLOGE("Cannot encrypt if there are multiple encryptable volumes"
+                  "%s\n", vol_list[i].label);
+            goto error_unencrypted;
         }
     }
 
@@ -1704,7 +3015,7 @@ int cryptfs_enable(char *howarg, char *passwd)
          * above, so just unmount it now.  We must do this _AFTER_ killing the framework,
          * unlike the case for vold managed devices above.
          */
-        if (wait_and_unmount(sd_mnt_point)) {
+        if (wait_and_unmount(sd_mnt_point, false)) {
             goto error_shutting_down;
         }
     }
@@ -1715,8 +3026,12 @@ int cryptfs_enable(char *howarg, char *passwd)
     }
 
     /* Now unmount the /data partition. */
-    if (wait_and_unmount(DATA_MNT_POINT)) {
-        goto error_shutting_down;
+    if (wait_and_unmount(DATA_MNT_POINT, false)) {
+        if (allow_reboot) {
+            goto error_shutting_down;
+        } else {
+            goto error_unencrypted;
+        }
     }
 
     /* Do extra work for a better UX when doing the long inplace encryption */
@@ -1757,113 +3072,117 @@ int cryptfs_enable(char *howarg, char *passwd)
 
     /* Start the actual work of making an encrypted filesystem */
     /* Initialize a crypt_mnt_ftr for the partition */
-    cryptfs_init_crypt_mnt_ftr(&crypt_ftr);
+    if (previously_encrypted_upto == 0) {
+        if (cryptfs_init_crypt_mnt_ftr(&crypt_ftr)) {
+            goto error_shutting_down;
+        }
 
-    if (!strcmp(key_loc, KEY_IN_FOOTER)) {
-        crypt_ftr.fs_size = nr_sec - (CRYPT_FOOTER_OFFSET / 512);
-    } else {
-        crypt_ftr.fs_size = nr_sec;
+        if (!strcmp(key_loc, KEY_IN_FOOTER)) {
+            crypt_ftr.fs_size = nr_sec
+              - (CRYPT_FOOTER_OFFSET / CRYPT_SECTOR_SIZE);
+        } else {
+            crypt_ftr.fs_size = nr_sec;
+        }
+        /* At this point, we are in an inconsistent state. Until we successfully
+           complete encryption, a reboot will leave us broken. So mark the
+           encryption failed in case that happens.
+           On successfully completing encryption, remove this flag */
+        crypt_ftr.flags |= CRYPT_INCONSISTENT_STATE;
+        crypt_ftr.crypt_type = crypt_type;
+        strcpy((char *)crypt_ftr.crypto_type_name, "aes-cbc-essiv:sha256");
+
+        /* Make an encrypted master key */
+        if (create_encrypted_random_key(passwd, crypt_ftr.master_key, crypt_ftr.salt, &crypt_ftr)) {
+            SLOGE("Cannot create encrypted master key\n");
+            goto error_shutting_down;
+        }
+
+        /* Write the key to the end of the partition */
+        put_crypt_ftr_and_key(&crypt_ftr);
+
+        /* If any persistent data has been remembered, save it.
+         * If none, create a valid empty table and save that.
+         */
+        if (!persist_data) {
+           pdata = malloc(CRYPT_PERSIST_DATA_SIZE);
+           if (pdata) {
+               init_empty_persist_data(pdata, CRYPT_PERSIST_DATA_SIZE);
+               persist_data = pdata;
+           }
+        }
+        if (persist_data) {
+            save_persistent_data();
+        }
     }
-    crypt_ftr.flags |= CRYPT_ENCRYPTION_IN_PROGRESS;
-    strcpy((char *)crypt_ftr.crypto_type_name, "aes-cbc-essiv:sha256");
 
-    /* Make an encrypted master key */
-    if (create_encrypted_random_key(passwd, crypt_ftr.master_key, crypt_ftr.salt, &crypt_ftr)) {
-        SLOGE("Cannot create encrypted master key\n");
-        goto error_unencrypted;
-    }
-
-    /* Write the key to the end of the partition */
-    put_crypt_ftr_and_key(&crypt_ftr);
-
-    /* If any persistent data has been remembered, save it.
-     * If none, create a valid empty table and save that.
-     */
-    if (!persist_data) {
-       pdata = malloc(CRYPT_PERSIST_DATA_SIZE);
-       if (pdata) {
-           init_empty_persist_data(pdata, CRYPT_PERSIST_DATA_SIZE);
-           persist_data = pdata;
-       }
-    }
-    if (persist_data) {
-        save_persistent_data();
-    }
-
-    decrypt_master_key(passwd, decrypted_master_key, &crypt_ftr);
+    decrypt_master_key(passwd, decrypted_master_key, &crypt_ftr, 0, 0);
     create_crypto_blk_dev(&crypt_ftr, decrypted_master_key, real_blkdev, crypto_blkdev,
                           "userdata");
 
-    /* The size of the userdata partition, and add in the vold volumes below */
-    tot_encryption_size = crypt_ftr.fs_size;
+    /* If we are continuing, check checksums match */
+    rc = 0;
+    if (previously_encrypted_upto) {
+        __le8 hash_first_block[SHA256_DIGEST_LENGTH];
+        rc = cryptfs_SHA256_fileblock(crypto_blkdev, hash_first_block);
 
-    /* setup crypto mapping for all encryptable volumes handled by vold */
-    for (i=0; i<num_vols; i++) {
-        if (should_encrypt(&vol_list[i])) {
-            vol_list[i].crypt_ftr = crypt_ftr; /* gotta love struct assign */
-            vol_list[i].crypt_ftr.fs_size = vol_list[i].size;
-            create_crypto_blk_dev(&vol_list[i].crypt_ftr, decrypted_master_key,
-                                  vol_list[i].blk_dev, vol_list[i].crypto_blkdev,
-                                  vol_list[i].label);
-            tot_encryption_size += vol_list[i].size;
+        if (!rc && memcmp(hash_first_block, crypt_ftr.hash_first_block,
+                          sizeof(hash_first_block)) != 0) {
+            SLOGE("Checksums do not match - trigger wipe");
+            rc = -1;
         }
     }
 
-    if (how == CRYPTO_ENABLE_WIPE) {
-        rc = cryptfs_enable_wipe(crypto_blkdev, crypt_ftr.fs_size, EXT4_FS);
-        /* Encrypt all encryptable volumes handled by vold */
-        if (!rc) {
-            for (i=0; i<num_vols; i++) {
-                if (should_encrypt(&vol_list[i])) {
-                    rc = cryptfs_enable_wipe(vol_list[i].crypto_blkdev,
-                                             vol_list[i].crypt_ftr.fs_size, FAT_FS);
-                }
-            }
+    if (!rc) {
+        rc = cryptfs_enable_all_volumes(&crypt_ftr, how,
+                                        crypto_blkdev, real_blkdev,
+                                        previously_encrypted_upto);
+    }
+
+    /* Calculate checksum if we are not finished */
+    if (!rc && crypt_ftr.encrypted_upto != crypt_ftr.fs_size) {
+        rc = cryptfs_SHA256_fileblock(crypto_blkdev,
+                                      crypt_ftr.hash_first_block);
+        if (rc) {
+            SLOGE("Error calculating checksum for continuing encryption");
+            rc = -1;
         }
-    } else if (how == CRYPTO_ENABLE_INPLACE) {
-        rc = cryptfs_enable_inplace(crypto_blkdev, real_blkdev, crypt_ftr.fs_size,
-                                    &cur_encryption_done, tot_encryption_size);
-        /* Encrypt all encryptable volumes handled by vold */
-        if (!rc) {
-            for (i=0; i<num_vols; i++) {
-                if (should_encrypt(&vol_list[i])) {
-                    rc = cryptfs_enable_inplace(vol_list[i].crypto_blkdev,
-                                                vol_list[i].blk_dev,
-                                                vol_list[i].crypt_ftr.fs_size,
-                                                &cur_encryption_done, tot_encryption_size);
-                }
-            }
-        }
-        if (!rc) {
-            /* The inplace routine never actually sets the progress to 100%
-             * due to the round down nature of integer division, so set it here */
-            property_set("vold.encrypt_progress", "100");
-        }
-    } else {
-        /* Shouldn't happen */
-        SLOGE("cryptfs_enable: internal error, unknown option\n");
-        goto error_unencrypted;
     }
 
     /* Undo the dm-crypt mapping whether we succeed or not */
     delete_crypto_blk_dev("userdata");
-    for (i=0; i<num_vols; i++) {
-        if (should_encrypt(&vol_list[i])) {
-            delete_crypto_blk_dev(vol_list[i].label);
-        }
-    }
 
     free(vol_list);
 
     if (! rc) {
         /* Success */
+        crypt_ftr.flags &= ~CRYPT_INCONSISTENT_STATE;
 
-        /* Clear the encryption in progres flag in the footer */
-        crypt_ftr.flags &= ~CRYPT_ENCRYPTION_IN_PROGRESS;
+        if (crypt_ftr.encrypted_upto != crypt_ftr.fs_size) {
+            SLOGD("Encrypted up to sector %lld - will continue after reboot",
+                  crypt_ftr.encrypted_upto);
+            crypt_ftr.flags |= CRYPT_ENCRYPTION_IN_PROGRESS;
+        }
+
         put_crypt_ftr_and_key(&crypt_ftr);
 
-        sleep(2); /* Give the UI a chance to show 100% progress */
-        cryptfs_reboot(0);
+        if (crypt_ftr.encrypted_upto == crypt_ftr.fs_size) {
+          char value[PROPERTY_VALUE_MAX];
+          property_get("ro.crypto.state", value, "");
+          if (!strcmp(value, "")) {
+            /* default encryption - continue first boot sequence */
+            property_set("ro.crypto.state", "encrypted");
+            release_wake_lock(lockid);
+            cryptfs_check_passwd(DEFAULT_PASSWORD);
+            cryptfs_restart_internal(1);
+            return 0;
+          } else {
+            sleep(2); /* Give the UI a chance to show 100% progress */
+            cryptfs_reboot(reboot);
+          }
+        } else {
+            sleep(2); /* Partially encrypted, ensure writes flushed to ssd */
+            cryptfs_reboot(shutdown);
+        }
     } else {
         char value[PROPERTY_VALUE_MAX];
 
@@ -1874,12 +3193,13 @@ int cryptfs_enable(char *howarg, char *passwd)
             mkdir("/cache/recovery", 0700);
             int fd = open("/cache/recovery/command", O_RDWR|O_CREAT|O_TRUNC, 0600);
             if (fd >= 0) {
-                write(fd, "--wipe_data", strlen("--wipe_data") + 1);
+                write(fd, "--wipe_data\n", strlen("--wipe_data\n") + 1);
+                write(fd, "--reason=cryptfs_enable_internal\n", strlen("--reason=cryptfs_enable_internal\n") + 1);
                 close(fd);
             } else {
                 SLOGE("could not open /cache/recovery/command\n");
             }
-            cryptfs_reboot(1);
+            cryptfs_reboot(recovery);
         } else {
             /* set property to trigger dialog */
             property_set("vold.encrypt_progress", "error_partially_encrypted");
@@ -1910,7 +3230,7 @@ error_shutting_down:
      * vold to restart the system.
      */
     SLOGE("Error enabling encryption after framework is shutdown, no data changed, restarting system");
-    cryptfs_reboot(0);
+    cryptfs_reboot(reboot);
 
     /* shouldn't get here */
     property_set("vold.encrypt_progress", "error_shutting_down");
@@ -1921,28 +3241,65 @@ error_shutting_down:
     return -1;
 }
 
-int cryptfs_changepw(char *newpw)
+int cryptfs_enable(char *howarg, int type, char *passwd, int allow_reboot)
+{
+    char* adjusted_passwd = adjust_passwd(passwd);
+    if (adjusted_passwd) {
+        passwd = adjusted_passwd;
+    }
+
+    int rc = cryptfs_enable_internal(howarg, type, passwd, allow_reboot);
+
+    free(adjusted_passwd);
+    return rc;
+}
+
+int cryptfs_enable_default(char *howarg, int allow_reboot)
+{
+    return cryptfs_enable_internal(howarg, CRYPT_TYPE_DEFAULT,
+                          DEFAULT_PASSWORD, allow_reboot);
+}
+
+int cryptfs_changepw(int crypt_type, const char *newpw)
 {
     struct crypt_mnt_ftr crypt_ftr;
     unsigned char decrypted_master_key[KEY_LEN_BYTES];
 
     /* This is only allowed after we've successfully decrypted the master key */
-    if (! master_key_saved) {
+    if (!master_key_saved) {
         SLOGE("Key not saved, aborting");
+        return -1;
+    }
+
+    if (crypt_type < 0 || crypt_type > CRYPT_TYPE_MAX_TYPE) {
+        SLOGE("Invalid crypt_type %d", crypt_type);
         return -1;
     }
 
     /* get key */
     if (get_crypt_ftr_and_key(&crypt_ftr)) {
-      SLOGE("Error getting crypt footer and key");
-      return -1;
+        SLOGE("Error getting crypt footer and key");
+        return -1;
     }
 
-    encrypt_master_key(newpw, crypt_ftr.salt, saved_master_key, crypt_ftr.master_key, &crypt_ftr);
+    crypt_ftr.crypt_type = crypt_type;
+
+    char* adjusted_passwd = adjust_passwd(newpw);
+    if (adjusted_passwd) {
+        newpw = adjusted_passwd;
+    }
+
+    encrypt_master_key(crypt_type == CRYPT_TYPE_DEFAULT ? DEFAULT_PASSWORD
+                                                        : newpw,
+                       crypt_ftr.salt,
+                       saved_master_key,
+                       crypt_ftr.master_key,
+                       &crypt_ftr);
 
     /* save the key */
     put_crypt_ftr_and_key(&crypt_ftr);
 
+    free(adjusted_passwd);
     return 0;
 }
 
@@ -2084,4 +3441,81 @@ int cryptfs_setfield(char *fieldname, char *value)
 
 out:
     return rc;
+}
+
+/* Checks userdata. Attempt to mount the volume if default-
+ * encrypted.
+ * On success trigger next init phase and return 0.
+ * Currently do not handle failure - see TODO below.
+ */
+int cryptfs_mount_default_encrypted(void)
+{
+    char decrypt_state[PROPERTY_VALUE_MAX];
+    property_get("vold.decrypt", decrypt_state, "0");
+    if (!strcmp(decrypt_state, "0")) {
+        SLOGE("Not encrypted - should not call here");
+    } else {
+        int crypt_type = cryptfs_get_password_type();
+        if (crypt_type < 0 || crypt_type > CRYPT_TYPE_MAX_TYPE) {
+            SLOGE("Bad crypt type - error");
+        } else if (crypt_type != CRYPT_TYPE_DEFAULT) {
+            SLOGD("Password is not default - "
+                  "starting min framework to prompt");
+            property_set("vold.decrypt", "trigger_restart_min_framework");
+            return 0;
+        } else if (cryptfs_check_passwd(DEFAULT_PASSWORD) == 0) {
+            SLOGD("Password is default - restarting filesystem");
+            cryptfs_restart_internal(0);
+            return 0;
+        } else {
+            SLOGE("Encrypted, default crypt type but can't decrypt");
+        }
+    }
+
+    /** Corrupt. Allow us to boot into framework, which will detect bad
+        crypto when it calls do_crypto_complete, then do a factory reset
+     */
+    property_set("vold.decrypt", "trigger_restart_min_framework");
+    return 0;
+}
+
+/* Returns type of the password, default, pattern, pin or password.
+ */
+int cryptfs_get_password_type(void)
+{
+    struct crypt_mnt_ftr crypt_ftr;
+
+    if (get_crypt_ftr_and_key(&crypt_ftr)) {
+        SLOGE("Error getting crypt footer and key\n");
+        return -1;
+    }
+
+    if (crypt_ftr.flags & CRYPT_INCONSISTENT_STATE) {
+        return -1;
+    }
+
+    return crypt_ftr.crypt_type;
+}
+
+char* cryptfs_get_password()
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (now.tv_sec < password_expiry_time) {
+        return password;
+    } else {
+        cryptfs_clear_password();
+        return 0;
+    }
+}
+
+void cryptfs_clear_password()
+{
+    if (password) {
+        size_t len = strlen(password);
+        memset(password, 0, len);
+        free(password);
+        password = 0;
+        password_expiry_time = 0;
+    }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008 The Android Open Source Project
+ * Copyright (C) 2014 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,24 +14,18 @@
  * limitations under the License.
  */
 
-#ifndef _XWARP_H
-#define _XWARP_H
+#ifndef _CHECKBATTERY_H__
+#define _CHECKBATTERY_H__
 
-#include <unistd.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-class Xwarp {
-    static const char *XWARP_BACKINGFILE;
-    static const char *XWARP_CFG;
-    static const char *XWARP_READY;
-    static const char *XWARP_MIRROR_STATUS;
+int is_battery_ok_to_start();
+int is_battery_ok_to_continue();
 
-public:
-    static int enable();
-    static int disable();
-    static int status(bool *ready, unsigned *mirrorPos, unsigned *maxSize);
-
-private:
-    static int doEnableDisable(bool enable);
-};
+#ifdef __cplusplus
+}
+#endif
 
 #endif

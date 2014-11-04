@@ -37,6 +37,11 @@
 
 #define FSTRIM_WAKELOCK "dofstrim"
 
+#define UNUSED __attribute__((unused))
+
+/* From a would-be kernel header */
+#define FIDTRIM         _IOWR('f', 128, struct fstrim_range)    /* Deep discard trim */
+
 static unsigned long long get_boot_time_ms(void)
 {
     struct timespec t;
@@ -50,7 +55,7 @@ static unsigned long long get_boot_time_ms(void)
     return time_ms;
 }
 
-static void *do_fstrim_filesystems(void *ignored)
+static void *do_fstrim_filesystems(void *thread_arg)
 {
     int i;
     int fd;
@@ -58,6 +63,7 @@ static void *do_fstrim_filesystems(void *ignored)
     struct fstrim_range range = { 0 };
     struct stat sb;
     extern struct fstab *fstab;
+    int deep_trim = !!thread_arg;
 
     SLOGI("Starting fstrim work...\n");
 
@@ -98,9 +104,11 @@ static void *do_fstrim_filesystems(void *ignored)
 
         memset(&range, 0, sizeof(range));
         range.len = ULLONG_MAX;
-        SLOGI("Invoking FITRIM ioctl on %s", fstab->recs[i].mount_point);
-        if (ioctl(fd, FITRIM, &range)) {
-            SLOGE("FITRIM ioctl failed on %s", fstab->recs[i].mount_point);
+        SLOGI("Invoking %s ioctl on %s", deep_trim ? "FIDTRIM" : "FITRIM", fstab->recs[i].mount_point);
+
+        ret = ioctl(fd, deep_trim ? FIDTRIM : FITRIM, &range);
+        if (ret) {
+            SLOGE("%s ioctl failed on %s (error %d/%s)", deep_trim ? "FIDTRIM" : "FITRIM", fstab->recs[i].mount_point, errno, strerror(errno));
             ret = -1;
         } else {
             SLOGI("Trimmed %llu bytes on %s\n", range.len, fstab->recs[i].mount_point);
@@ -116,10 +124,10 @@ static void *do_fstrim_filesystems(void *ignored)
     /* Release the wakelock that let us work */
     release_wake_lock(FSTRIM_WAKELOCK);
 
-    return (void *)ret;
+    return (void *)(uintptr_t)ret;
 }
 
-int fstrim_filesystems(void)
+int fstrim_filesystems(int deep_trim)
 {
     pthread_t t;
     int ret;
@@ -140,7 +148,7 @@ int fstrim_filesystems(void)
      * the kernel will "do the right thing" and split the work between
      * the two ioctls invoked in separate threads.
      */
-    ret = pthread_create(&t, NULL, do_fstrim_filesystems, NULL);
+    ret = pthread_create(&t, NULL, do_fstrim_filesystems, (void *)(intptr_t)deep_trim);
     if (ret) {
         SLOGE("Cannot create thread to do fstrim");
         return ret;

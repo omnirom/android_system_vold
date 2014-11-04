@@ -169,7 +169,7 @@ void Volume::handleVolumeShared() {
 void Volume::handleVolumeUnshared() {
 }
 
-int Volume::handleBlockEvent(NetlinkEvent *evt) {
+int Volume::handleBlockEvent(NetlinkEvent * /*evt*/) {
     errno = ENOSYS;
     return -1;
 }
@@ -283,7 +283,7 @@ int Volume::formatVol(bool wipe) {
     // Only initialize the MBR if we are formatting the entire device
     if (formatEntireDevice) {
         sprintf(devicePath, "/dev/block/vold/%d:%d",
-                MAJOR(diskNode), MINOR(diskNode));
+                major(diskNode), minor(diskNode));
 
         if (initializeMbr(devicePath)) {
             SLOGE("Failed to initialize MBR (%s)", strerror(errno));
@@ -292,7 +292,7 @@ int Volume::formatVol(bool wipe) {
     }
 
     sprintf(devicePath, "/dev/block/vold/%d:%d",
-            MAJOR(partNode), MINOR(partNode));
+            major(partNode), minor(partNode));
 
 #ifdef VOLD_EMMC_SHARES_DEV_MAJOR
     // If emmc and sdcard share dev major number, vold may pick
@@ -422,14 +422,14 @@ int Volume::mountVol() {
 
        if (n != 1) {
            /* We only expect one device node returned when mounting encryptable volumes */
-           SLOGE("Too many device nodes returned when mounting %d\n", getMountpoint());
+           SLOGE("Too many device nodes returned when mounting %s\n", getMountpoint());
            return -1;
        }
 
        if (cryptfs_setup_volume(getLabel(), MAJOR(deviceNodes[0]), MINOR(deviceNodes[0]),
                                 new_sys_path, sizeof(new_sys_path),
                                 &new_major, &new_minor)) {
-           SLOGE("Cannot setup encryption mapping for %d\n", getMountpoint());
+           SLOGE("Cannot setup encryption mapping for %s\n", getMountpoint());
            return -1;
        }
        /* We now have the new sysfs path for the decrypted block device, and the
@@ -460,8 +460,8 @@ int Volume::mountVol() {
         char devicePath[255];
         char *fstype = NULL;
 
-        sprintf(devicePath, "/dev/block/vold/%d:%d", MAJOR(deviceNodes[i]),
-                MINOR(deviceNodes[i]));
+        sprintf(devicePath, "/dev/block/vold/%d:%d", major(deviceNodes[i]),
+                minor(deviceNodes[i]));
 
         SLOGI("%s being considered for volume %s\n", devicePath, getLabel());
 

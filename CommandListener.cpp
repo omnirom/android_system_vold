@@ -22,6 +22,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fs_mgr.h>
 #include <string.h>
 
 #define LOG_TAG "VoldCmdListener"
@@ -34,7 +35,6 @@
 #include "VolumeManager.h"
 #include "ResponseCode.h"
 #include "Process.h"
-#include "Xwarp.h"
 #include "Loop.h"
 #include "Devmapper.h"
 #include "cryptfs.h"
@@ -49,13 +49,12 @@ CommandListener::CommandListener() :
     registerCmd(new AsecCmd());
     registerCmd(new ObbCmd());
     registerCmd(new StorageCmd());
-    registerCmd(new XwarpCmd());
     registerCmd(new CryptfsCmd());
     registerCmd(new FstrimCmd());
 }
 
-void CommandListener::dumpArgs(int argc, char **argv, int argObscure) {
 #if DUMP_ARGS
+void CommandListener::dumpArgs(int argc, char **argv, int argObscure) {
     char buffer[4096];
     char *p = buffer;
 
@@ -81,15 +80,17 @@ void CommandListener::dumpArgs(int argc, char **argv, int argObscure) {
         }
     }
     SLOGD("%s", buffer);
-#endif
 }
+#else
+void CommandListener::dumpArgs(int /*argc*/, char ** /*argv*/, int /*argObscure*/) { }
+#endif
 
 CommandListener::DumpCmd::DumpCmd() :
                  VoldCommand("dump") {
 }
 
 int CommandListener::DumpCmd::runCommand(SocketClient *cli,
-                                         int argc, char **argv) {
+                                         int /*argc*/, char ** /*argv*/) {
     cli->sendMsg(0, "Dumping loop status", false);
     if (Loop::dumpState(cli)) {
         cli->sendMsg(ResponseCode::CommandOkay, "Loop dump failed", true);
@@ -113,13 +114,12 @@ int CommandListener::DumpCmd::runCommand(SocketClient *cli,
     return 0;
 }
 
-
 CommandListener::VolumeCmd::VolumeCmd() :
                  VoldCommand("volume") {
 }
 
 int CommandListener::VolumeCmd::runCommand(SocketClient *cli,
-                                                      int argc, char **argv) {
+                                           int argc, char **argv) {
     dumpArgs(argc, argv, -1);
 
     if (argc < 2) {
@@ -131,7 +131,8 @@ int CommandListener::VolumeCmd::runCommand(SocketClient *cli,
     int rc = 0;
 
     if (!strcmp(argv[1], "list")) {
-        return vm->listVolumes(cli);
+        bool broadcast = argc >= 3 && !strcmp(argv[2], "broadcast");
+        return vm->listVolumes(cli, broadcast);
     } else if (!strcmp(argv[1], "debug")) {
         if (argc != 3 || (argc == 3 && (strcmp(argv[2], "off") && strcmp(argv[2], "on")))) {
             cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: volume debug <off/on>", false);
@@ -229,6 +230,9 @@ CommandListener::StorageCmd::StorageCmd() :
 
 int CommandListener::StorageCmd::runCommand(SocketClient *cli,
                                                       int argc, char **argv) {
+    /* Guarantied to be initialized by vold's main() before the CommandListener is active */
+    extern struct fstab *fstab;
+
     dumpArgs(argc, argv, -1);
 
     if (argc < 2) {
@@ -236,10 +240,23 @@ int CommandListener::StorageCmd::runCommand(SocketClient *cli,
         return 0;
     }
 
+    if (!strcmp(argv[1], "mountall")) {
+        if (argc != 2) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: mountall", false);
+            return 0;
+        }
+        fs_mgr_mount_all(fstab);
+        cli->sendMsg(ResponseCode::CommandOkay, "Mountall ran successfully", false);
+        return 0;
+    }
     if (!strcmp(argv[1], "users")) {
         DIR *dir;
         struct dirent *de;
 
+        if (argc < 3) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing Argument: user <mountpoint>", false);
+            return 0;
+        }
         if (!(dir = opendir("/proc"))) {
             cli->sendMsg(ResponseCode::OperationFailed, "Failed to open /proc", true);
             return 0;
@@ -343,6 +360,14 @@ int CommandListener::AsecCmd::runCommand(SocketClient *cli,
         unsigned int numSectors = (atoi(argv[3]) * (1024 * 1024)) / 512;
         const bool isExternal = (atoi(argv[7]) == 1);
         rc = vm->createAsec(argv[2], numSectors, argv[4], argv[5], atoi(argv[6]), isExternal);
+    } else if (!strcmp(argv[1], "resize")) {
+        dumpArgs(argc, argv, -1);
+        if (argc != 5) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: asec resize <container-id> <size_mb> <key>", false);
+            return 0;
+        }
+        unsigned int numSectors = (atoi(argv[3]) * (1024 * 1024)) / 512;
+        rc = vm->resizeAsec(argv[2], numSectors, argv[4]);
     } else if (!strcmp(argv[1], "finalize")) {
         dumpArgs(argc, argv, -1);
         if (argc != 3) {
@@ -378,12 +403,16 @@ int CommandListener::AsecCmd::runCommand(SocketClient *cli,
         rc = vm->destroyAsec(argv[2], force);
     } else if (!strcmp(argv[1], "mount")) {
         dumpArgs(argc, argv, 3);
-        if (argc != 5) {
+        if (argc != 6) {
             cli->sendMsg(ResponseCode::CommandSyntaxError,
-                    "Usage: asec mount <namespace-id> <key> <ownerUid>", false);
+                    "Usage: asec mount <namespace-id> <key> <ownerUid> <ro|rw>", false);
             return 0;
         }
-        rc = vm->mountAsec(argv[2], argv[3], atoi(argv[4]));
+        bool readOnly = true;
+        if (!strcmp(argv[5], "rw")) {
+            readOnly = false;
+        }
+        rc = vm->mountAsec(argv[2], argv[3], atoi(argv[4]), readOnly);
     } else if (!strcmp(argv[1], "unmount")) {
         dumpArgs(argc, argv, -1);
         if (argc < 3) {
@@ -506,51 +535,23 @@ int CommandListener::ObbCmd::runCommand(SocketClient *cli,
     return 0;
 }
 
-CommandListener::XwarpCmd::XwarpCmd() :
-                 VoldCommand("xwarp") {
-}
-
-int CommandListener::XwarpCmd::runCommand(SocketClient *cli,
-                                                      int argc, char **argv) {
-    if (argc < 2) {
-        cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing Argument", false);
-        return 0;
-    }
-
-    if (!strcmp(argv[1], "enable")) {
-        if (Xwarp::enable()) {
-            cli->sendMsg(ResponseCode::OperationFailed, "Failed to enable xwarp", true);
-            return 0;
-        }
-
-        cli->sendMsg(ResponseCode::CommandOkay, "Xwarp mirroring started", false);
-    } else if (!strcmp(argv[1], "disable")) {
-        if (Xwarp::disable()) {
-            cli->sendMsg(ResponseCode::OperationFailed, "Failed to disable xwarp", true);
-            return 0;
-        }
-
-        cli->sendMsg(ResponseCode::CommandOkay, "Xwarp disabled", false);
-    } else if (!strcmp(argv[1], "status")) {
-        char msg[255];
-        bool r;
-        unsigned mirrorPos, maxSize;
-
-        if (Xwarp::status(&r, &mirrorPos, &maxSize)) {
-            cli->sendMsg(ResponseCode::OperationFailed, "Failed to get xwarp status", true);
-            return 0;
-        }
-        snprintf(msg, sizeof(msg), "%s %u %u", (r ? "ready" : "not-ready"), mirrorPos, maxSize);
-        cli->sendMsg(ResponseCode::XwarpStatusResult, msg, false);
-    } else {
-        cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown storage cmd", false);
-    }
-
-    return 0;
-}
-
 CommandListener::CryptfsCmd::CryptfsCmd() :
                  VoldCommand("cryptfs") {
+}
+
+static int getType(const char* type)
+{
+    if (!strcmp(type, "default")) {
+        return CRYPT_TYPE_DEFAULT;
+    } else if (!strcmp(type, "password")) {
+        return CRYPT_TYPE_PASSWORD;
+    } else if (!strcmp(type, "pin")) {
+        return CRYPT_TYPE_PIN;
+    } else if (!strcmp(type, "pattern")) {
+        return CRYPT_TYPE_PATTERN;
+    } else {
+        return -1;
+    }
 }
 
 int CommandListener::CryptfsCmd::runCommand(SocketClient *cli,
@@ -589,19 +590,54 @@ int CommandListener::CryptfsCmd::runCommand(SocketClient *cli,
         dumpArgs(argc, argv, -1);
         rc = cryptfs_crypto_complete();
     } else if (!strcmp(argv[1], "enablecrypto")) {
-        if ( (argc != 4) || (strcmp(argv[2], "wipe") && strcmp(argv[2], "inplace")) ) {
-            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: cryptfs enablecrypto <wipe|inplace> <passwd>", false);
+        const char* syntax = "Usage: cryptfs enablecrypto <wipe|inplace> "
+                             "default|password|pin|pattern [passwd]";
+        if ( (argc != 4 && argc != 5)
+             || (strcmp(argv[2], "wipe") && strcmp(argv[2], "inplace")) ) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, syntax, false);
             return 0;
         }
-        dumpArgs(argc, argv, 3);
-        rc = cryptfs_enable(argv[2], argv[3]);
+        dumpArgs(argc, argv, 4);
+
+        int tries;
+        for (tries = 0; tries < 2; ++tries) {
+            int type = getType(argv[3]);
+            if (type == -1) {
+                cli->sendMsg(ResponseCode::CommandSyntaxError, syntax,
+                             false);
+                return 0;
+            } else if (type == CRYPT_TYPE_DEFAULT) {
+              rc = cryptfs_enable_default(argv[2], /*allow_reboot*/false);
+            } else {
+                rc = cryptfs_enable(argv[2], type, argv[4],
+                                    /*allow_reboot*/false);
+            }
+
+            if (rc == 0) {
+                break;
+            } else if (tries == 0) {
+                Process::killProcessesWithOpenFiles(DATA_MNT_POINT, 2);
+            }
+        }
     } else if (!strcmp(argv[1], "changepw")) {
-        if (argc != 3) {
-            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: cryptfs changepw <newpasswd>", false);
+        const char* syntax = "Usage: cryptfs changepw "
+                             "default|password|pin|pattern [newpasswd]";
+        const char* password;
+        if (argc == 3) {
+            password = "";
+        } else if (argc == 4) {
+            password = argv[3];
+        } else {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, syntax, false);
             return 0;
-        } 
-        SLOGD("cryptfs changepw {}");
-        rc = cryptfs_changepw(argv[2]);
+        }
+        int type = getType(argv[2]);
+        if (type == -1) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, syntax, false);
+            return 0;
+        }
+        SLOGD("cryptfs changepw %s {}", argv[2]);
+        rc = cryptfs_changepw(type, password);
     } else if (!strcmp(argv[1], "verifypw")) {
         if (argc != 3) {
             cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: cryptfs verifypw <passwd>", false);
@@ -628,9 +664,49 @@ int CommandListener::CryptfsCmd::runCommand(SocketClient *cli,
         }
         dumpArgs(argc, argv, -1);
         rc = cryptfs_setfield(argv[2], argv[3]);
+    } else if (!strcmp(argv[1], "mountdefaultencrypted")) {
+        SLOGD("cryptfs mountdefaultencrypted");
+        dumpArgs(argc, argv, -1);
+        rc = cryptfs_mount_default_encrypted();
+    } else if (!strcmp(argv[1], "getpwtype")) {
+        SLOGD("cryptfs getpwtype");
+        dumpArgs(argc, argv, -1);
+        switch(cryptfs_get_password_type()) {
+        case CRYPT_TYPE_PASSWORD:
+            cli->sendMsg(ResponseCode::PasswordTypeResult, "password", false);
+            return 0;
+        case CRYPT_TYPE_PATTERN:
+            cli->sendMsg(ResponseCode::PasswordTypeResult, "pattern", false);
+            return 0;
+        case CRYPT_TYPE_PIN:
+            cli->sendMsg(ResponseCode::PasswordTypeResult, "pin", false);
+            return 0;
+        case CRYPT_TYPE_DEFAULT:
+            cli->sendMsg(ResponseCode::PasswordTypeResult, "default", false);
+            return 0;
+        default:
+          /** @TODO better error and make sure handled by callers */
+            cli->sendMsg(ResponseCode::OpFailedStorageNotFound, "Error", false);
+            return 0;
+        }
+    } else if (!strcmp(argv[1], "getpw")) {
+        SLOGD("cryptfs getpw");
+        dumpArgs(argc, argv, -1);
+        char* password = cryptfs_get_password();
+        if (password) {
+            cli->sendMsg(ResponseCode::CommandOkay, password, false);
+            return 0;
+        }
+        rc = -1;
+    } else if (!strcmp(argv[1], "clearpw")) {
+        SLOGD("cryptfs clearpw");
+        dumpArgs(argc, argv, -1);
+        cryptfs_clear_password();
+        rc = 0;
     } else {
         dumpArgs(argc, argv, -1);
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown cryptfs cmd", false);
+        return 0;
     }
 
     // Always report that the command succeeded and return the error code.
@@ -665,7 +741,14 @@ int CommandListener::FstrimCmd::runCommand(SocketClient *cli,
             return 0;
         }
         dumpArgs(argc, argv, -1);
-        rc = fstrim_filesystems();
+        rc = fstrim_filesystems(0);
+    } else if (!strcmp(argv[1], "dodtrim")) {
+        if (argc != 2) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: fstrim dodtrim", false);
+            return 0;
+        }
+        dumpArgs(argc, argv, -1);
+        rc = fstrim_filesystems(1);   /* Do Deep Discard trim */
     } else {
         dumpArgs(argc, argv, -1);
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown fstrim cmd", false);

@@ -227,7 +227,7 @@ int Loop::destroyByDevice(const char *loopDevice) {
     return 0;
 }
 
-int Loop::destroyByFile(const char *loopFile) {
+int Loop::destroyByFile(const char * /*loopFile*/) {
     errno = ENOSYS;
     return -1;
 }
@@ -244,6 +244,34 @@ int Loop::createImageFile(const char *file, unsigned int numSectors) {
         SLOGE("Error truncating imagefile (%s)", strerror(errno));
         close(fd);
         return -1;
+    }
+    close(fd);
+    return 0;
+}
+
+int Loop::resizeImageFile(const char *file, unsigned int numSectors) {
+    int fd;
+
+    if ((fd = open(file, O_RDWR)) < 0) {
+        SLOGE("Error opening imagefile (%s)", strerror(errno));
+        return -1;
+    }
+
+    SLOGD("Attempting to increase size of %s to %d sectors.", file, numSectors);
+
+    if (fallocate(fd, 0, 0, numSectors * 512)) {
+        if (errno == ENOSYS || errno == ENOTSUP) {
+            SLOGW("fallocate not found. Falling back to ftruncate.");
+            if (ftruncate(fd, numSectors * 512) < 0) {
+                SLOGE("Error truncating imagefile (%s)", strerror(errno));
+                close(fd);
+                return -1;
+            }
+        } else {
+            SLOGE("Error allocating space (%s)", strerror(errno));
+            close(fd);
+            return -1;
+        }
     }
     close(fd);
     return 0;

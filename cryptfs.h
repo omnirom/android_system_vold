@@ -27,10 +27,11 @@
  */
 
 #include <cutils/properties.h>
+#include <openssl/sha.h>
 
 /* The current cryptfs version */
 #define CURRENT_MAJOR_VERSION 1
-#define CURRENT_MINOR_VERSION 2
+#define CURRENT_MINOR_VERSION 3
 
 #define CRYPT_FOOTER_OFFSET 0x4000
 #define CRYPT_FOOTER_TO_PERSIST_OFFSET 0x1000
@@ -40,11 +41,27 @@
 
 #define MAX_KEY_LEN 48
 #define SALT_LEN 16
+#define SCRYPT_LEN 32
 
 /* definitions of flags in the structure below */
 #define CRYPT_MNT_KEY_UNENCRYPTED 0x1 /* The key for the partition is not encrypted. */
-#define CRYPT_ENCRYPTION_IN_PROGRESS 0x2 /* Set when starting encryption,
-                                          * clear when done before rebooting */
+#define CRYPT_ENCRYPTION_IN_PROGRESS 0x2 /* Encryption partially completed,
+                                            encrypted_upto valid*/
+#define CRYPT_INCONSISTENT_STATE 0x4 /* Set when starting encryption, clear when
+                                        exit cleanly, either through success or
+                                        correctly marked partial encryption */
+#define CRYPT_DATA_CORRUPT 0x8 /* Set when encryption is fine, but the
+                                  underlying volume is corrupt */
+
+/* Allowed values for type in the structure below */
+#define CRYPT_TYPE_PASSWORD 0 /* master_key is encrypted with a password
+                               * Must be zero to be compatible with pre-L
+                               * devices where type is always password.*/
+#define CRYPT_TYPE_DEFAULT  1 /* master_key is encrypted with default
+                               * password */
+#define CRYPT_TYPE_PATTERN  2 /* master_key is encrypted with a pattern */
+#define CRYPT_TYPE_PIN      3 /* master_key is encrypted with a pin */
+#define CRYPT_TYPE_MAX_TYPE 3 /* type cannot be larger than this value */
 
 #define CRYPT_MNT_MAGIC 0xD0B5B1C4
 #define PERSIST_DATA_MAGIC 0xE950CD44
@@ -55,25 +72,33 @@
 /* Key Derivation Function algorithms */
 #define KDF_PBKDF2 1
 #define KDF_SCRYPT 2
+/* TODO(paullawrence): Remove KDF_SCRYPT_KEYMASTER_UNPADDED and KDF_SCRYPT_KEYMASTER_BADLY_PADDED
+ * when it is safe to do so. */
+#define KDF_SCRYPT_KEYMASTER_UNPADDED 3
+#define KDF_SCRYPT_KEYMASTER_BADLY_PADDED 4
+#define KDF_SCRYPT_KEYMASTER 5
 
-#define __le32 unsigned int
-#define __le16 unsigned short int
+/* Maximum allowed keymaster blob size. */
+#define KEYMASTER_BLOB_SIZE 2048
+
+/* __le32 and __le16 defined in system/extras/ext4_utils/ext4_utils.h */
 #define __le8  unsigned char
 
 struct crypt_mnt_ftr {
-  __le32 magic;		/* See above */
+  __le32 magic;         /* See above */
   __le16 major_version;
   __le16 minor_version;
-  __le32 ftr_size; 	/* in bytes, not including key following */
-  __le32 flags;		/* See above */
-  __le32 keysize;	/* in bytes */
-  __le32 spare1;	/* ignored */
+  __le32 ftr_size;      /* in bytes, not including key following */
+  __le32 flags;         /* See above */
+  __le32 keysize;       /* in bytes */
+  __le32 crypt_type;    /* how master_key is encrypted. Must be a
+                         * CRYPT_TYPE_XXX value */
   __le64 fs_size;	/* Size of the encrypted fs, in 512 byte sectors */
   __le32 failed_decrypt_count; /* count of # of failed attempts to decrypt and
-				  mount, set to 0 on successful mount */
+                                  mount, set to 0 on successful mount */
   unsigned char crypto_type_name[MAX_CRYPTO_TYPE_NAME_LEN]; /* The type of encryption
-							       needed to decrypt this
-							       partition, null terminated */
+                                                               needed to decrypt this
+                                                               partition, null terminated */
   __le32 spare2;        /* ignored */
   unsigned char master_key[MAX_KEY_LEN]; /* The encrypted key for decrypting the filesystem */
   unsigned char salt[SALT_LEN];   /* The salt used for this encryption */
@@ -90,6 +115,35 @@ struct crypt_mnt_ftr {
   __le8  N_factor; /* (1 << N) */
   __le8  r_factor; /* (1 << r) */
   __le8  p_factor; /* (1 << p) */
+  __le64 encrypted_upto; /* If we are in state CRYPT_ENCRYPTION_IN_PROGRESS and
+                            we have to stop (e.g. power low) this is the last
+                            encrypted 512 byte sector.*/
+  __le8  hash_first_block[SHA256_DIGEST_LENGTH]; /* When CRYPT_ENCRYPTION_IN_PROGRESS
+                                                    set, hash of first block, used
+                                                    to validate before continuing*/
+
+  /* key_master key, used to sign the derived key which is then used to generate
+   * the intermediate key
+   * This key should be used for no other purposes! We use this key to sign unpadded 
+   * data, which is acceptable but only if the key is not reused elsewhere. */
+  __le8 keymaster_blob[KEYMASTER_BLOB_SIZE];
+  __le32 keymaster_blob_size;
+
+  /* Store scrypt of salted intermediate key. When decryption fails, we can
+     check if this matches, and if it does, we know that the problem is with the
+     drive, and there is no point in asking the user for more passwords.
+
+     Note that if any part of this structure is corrupt, this will not match and
+     we will continue to believe the user entered the wrong password. In that
+     case the only solution is for the user to enter a password enough times to
+     force a wipe.
+
+     Note also that there is no need to worry about migration. If this data is
+     wrong, we simply won't recognise a right password, and will continue to
+     prompt. On the first password change, this value will be populated and
+     then we will be OK.
+   */
+  unsigned char scrypted_intermediate_key[SCRYPT_LEN];
 };
 
 /* Persistant data that should be available before decryption.
@@ -132,25 +186,45 @@ struct volume_info {
 #define VOL_PRIMARY        0x4
 #define VOL_PROVIDES_ASEC  0x8
 
+#define DATA_MNT_POINT "/data"
+
+/* Return values for cryptfs_crypto_complete */
+#define CRYPTO_COMPLETE_NOT_ENCRYPTED  1
+#define CRYPTO_COMPLETE_ENCRYPTED      0
+#define CRYPTO_COMPLETE_BAD_METADATA  -1
+#define CRYPTO_COMPLETE_PARTIAL       -2
+#define CRYPTO_COMPLETE_INCONSISTENT  -3
+#define CRYPTO_COMPLETE_CORRUPT       -4
+
+/* Return values for cryptfs_enable_inplace*() */
+#define ENABLE_INPLACE_OK 0
+#define ENABLE_INPLACE_ERR_OTHER -1
+#define ENABLE_INPLACE_ERR_DEV -2  /* crypto_blkdev issue */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-  typedef void (*kdf_func)(char *passwd, unsigned char *salt, unsigned char *ikey, void *params);
+  typedef int (*kdf_func)(const char *passwd, const unsigned char *salt,
+                          unsigned char *ikey, void *params);
 
   int cryptfs_crypto_complete(void);
   int cryptfs_check_passwd(char *pw);
   int cryptfs_verify_passwd(char *newpw);
   int cryptfs_restart(void);
-  int cryptfs_enable(char *flag, char *passwd);
-  int cryptfs_changepw(char *newpw);
+  int cryptfs_enable(char *flag, int type, char *passwd, int allow_reboot);
+  int cryptfs_changepw(int type, const char *newpw);
+  int cryptfs_enable_default(char *flag, int allow_reboot);
   int cryptfs_setup_volume(const char *label, int major, int minor,
                            char *crypto_dev_path, unsigned int max_pathlen,
                            int *new_major, int *new_minor);
   int cryptfs_revert_volume(const char *label);
   int cryptfs_getfield(char *fieldname, char *value, int len);
   int cryptfs_setfield(char *fieldname, char *value);
+  int cryptfs_mount_default_encrypted(void);
+  int cryptfs_get_password_type(void);
+  char* cryptfs_get_password(void);
+  void cryptfs_clear_password(void);
 #ifdef __cplusplus
 }
 #endif
-
