@@ -1,5 +1,7 @@
 LOCAL_PATH:= $(call my-dir)
 
+common_cflags := -Werror -std=c++11
+
 ifneq ($(BOARD_VOLD_MAX_PARTITIONS),)
 common_cflags += -DVOLD_MAX_PARTITIONS=$(BOARD_VOLD_MAX_PARTITIONS)
 endif
@@ -15,8 +17,6 @@ endif
 ifneq ($(TARGET_USE_CUSTOM_LUN_FILE_PATH),)
 common_cflags += -DCUSTOM_LUN_FILE=\"$(TARGET_USE_CUSTOM_LUN_FILE_PATH)\"
 endif
-
-common_cflags += -Werror
 
 common_src_files := \
 	VolumeManager.cpp \
@@ -50,7 +50,8 @@ common_c_includes := \
 	frameworks/native/include \
 	system/security/keystore \
 	hardware/libhardware/include/hardware \
-	system/security/softkeymaster/include/keymaster
+	system/security/softkeymaster/include/keymaster \
+        system/core/toolbox
 
 common_shared_libraries := \
 	libsysutils \
