@@ -49,7 +49,7 @@ static char EXFAT_MOUNT[] = "/system/bin/mount.exfat";
 int Exfat::doMount(const char *fsPath, const char *mountPoint,
                  bool ro, bool remount, bool executable,
                  int ownerUid, int ownerGid, int permMask,bool sdcard) {
-
+    (void) remount;
     int rc = -1;
     char mountData[255];
     const char *args[6];

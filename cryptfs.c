@@ -3021,7 +3021,7 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, char *passwd,
     }
 
     /* Unmount the /data/data partition bind-mounted on some devices. */
-    if (wait_and_unmount("/data/data")) {
+    if (wait_and_unmount("/data/data", false)) {
         goto error_shutting_down;
     }
 
