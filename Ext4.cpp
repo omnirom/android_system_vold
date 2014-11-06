@@ -43,7 +43,7 @@
 #include "Ext4.h"
 #include "VoldUtil.h"
 
-#define E2FSCK_PATH "/system/bin/e2fsck";
+#define E2FSCK_PATH "/system/bin/e2fsck"
 #define MKEXT4FS_PATH "/system/bin/make_ext4fs"
 #define RESIZE2FS_PATH "/system/bin/resize2fs"
 
