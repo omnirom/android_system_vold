@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "key": {
+        "uuid": "2b432935_0bc9fdad",
+        "filename": "DirectVolume.cpp",
+        "patchSetId": 2
+      },
+      "lineNbr": 444,
+      "author": {
+        "id": 1000032
+      },
+      "writtenOn": "2014-11-20T04:24:20Z",
+      "side": 1,
+      "message": "mPartMinors[mPartIdx - 1] returns -1, causing an overflow on i9100g. Need to investigate.",
+      "revId": "76e85f0653f8c2fa159940ec2883b27144657284",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    }
+  ]
+}
