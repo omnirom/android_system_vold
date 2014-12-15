@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "key": {
+        "uuid": "eb3671c6_affe3dfd",
+        "filename": "Android.mk",
+        "patchSetId": 3
+      },
+      "lineNbr": 38,
+      "author": {
+        "id": 1000026
+      },
+      "writtenOn": "2014-12-15T21:47:25Z",
+      "side": 1,
+      "message": "what kern headers are needed?",
+      "revId": "9dbb7f5dd4c8dbec2ab82efea9ee6bf64e232f71",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    }
+  ]
+}
