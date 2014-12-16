@@ -16,6 +16,47 @@
       "revId": "9dbb7f5dd4c8dbec2ab82efea9ee6bf64e232f71",
       "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
       "unresolved": false
+    },
+    {
+      "key": {
+        "uuid": "eb3671c6_af271db1",
+        "filename": "Android.mk",
+        "patchSetId": 3
+      },
+      "lineNbr": 38,
+      "author": {
+        "id": 1000026
+      },
+      "writtenOn": "2014-12-16T14:30:39Z",
+      "side": 1,
+      "message": "Done",
+      "parentUuid": "eb3671c6_affe3dfd",
+      "revId": "9dbb7f5dd4c8dbec2ab82efea9ee6bf64e232f71",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    },
+    {
+      "key": {
+        "uuid": "eb3671c6_2fdded72",
+        "filename": "Android.mk",
+        "patchSetId": 3
+      },
+      "lineNbr": 101,
+      "author": {
+        "id": 1000026
+      },
+      "writtenOn": "2014-12-16T14:30:39Z",
+      "side": 1,
+      "message": "sorry to be annoying :)\n\nsame question as above - does building this requires any kernel headers? I has not needed them before.",
+      "range": {
+        "startLine": 101,
+        "startChar": 22,
+        "endLine": 101,
+        "endChar": 36
+      },
+      "revId": "9dbb7f5dd4c8dbec2ab82efea9ee6bf64e232f71",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
     }
   ]
 }
