@@ -210,9 +210,14 @@ void DirectVolume::handleDiskAdded(const char * /*devpath*/,
         mDiskNumParts = 1;
     }
 
-    mPendingPartCount = mDiskNumParts;
-    for (int i = 0; i < MAX_PARTITIONS; i++)
-        mPartMinors[i] = -1;
+    if (mDiskNumParts > MAX_PARTITIONS)
+        mDiskNumParts = MAX_PARTITIONS;
+
+    int partmask = 0;
+    for (int i = 0; i < mDiskNumParts; i++) {
+        partmask |= (1 << i);
+    }
+    mPendingPartCount = partmask;
 
     if (mDiskNumParts == 0) {
 #ifdef PARTITION_DEBUG
@@ -270,10 +275,9 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
     if (part_num >= MAX_PARTITIONS) {
         SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d)\n", part_num, MAX_PARTITIONS-1);
     } else {
-        if ((mPartMinors[part_num - 1] == -1) && mPendingPartCount)
-            mPendingPartCount--;
         mPartMinors[part_num -1] = minor;
     }
+    mPendingPartCount &= ~(1 << part_num);
 
     if (!mPendingPartCount) {
 #ifdef PARTITION_DEBUG
@@ -311,9 +315,14 @@ void DirectVolume::handleDiskChanged(const char * /*devpath*/,
         mDiskNumParts = 1;
     }
 
-    mPendingPartCount = mDiskNumParts;
-    for (int i = 0; i < MAX_PARTITIONS; i++)
-        mPartMinors[i] = -1;
+    if (mDiskNumParts > MAX_PARTITIONS)
+        mDiskNumParts = MAX_PARTITIONS;
+
+    int partmask = 0;
+    for (int i = 0; i < mDiskNumParts; i++) {
+        partmask |= (1 << i);
+    }
+    mPendingPartCount = partmask;
 
     if (getState() != Volume::State_Formatting) {
         if (mDiskNumParts == 0) {
