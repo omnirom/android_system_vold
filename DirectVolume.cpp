@@ -32,7 +32,7 @@
 #include "ResponseCode.h"
 #include "cryptfs.h"
 
-// #define PARTITION_DEBUG
+#define PARTITION_DEBUG
 
 PathInfo::PathInfo(const char *p)
 {
@@ -210,9 +210,15 @@ void DirectVolume::handleDiskAdded(const char * /*devpath*/,
         mDiskNumParts = 1;
     }
 
-    mPendingPartCount = mDiskNumParts;
-    for (int i = 0; i < MAX_PARTITIONS; i++)
-        mPartMinors[i] = -1;
+    if (mDiskNumParts > MAX_PARTITIONS)
+        mDiskNumParts = MAX_PARTITIONS;
+
+    int partmask = 0;
+    for (int i = 1; i <= mDiskNumParts; i++) {
+        mPartMinors[i-1] = -1;
+        partmask |= (1 << i);
+    }
+    mPendingPartCount = partmask;
 
     if (mDiskNumParts == 0) {
 #ifdef PARTITION_DEBUG
@@ -311,9 +317,15 @@ void DirectVolume::handleDiskChanged(const char * /*devpath*/,
         mDiskNumParts = 1;
     }
 
-    mPendingPartCount = mDiskNumParts;
-    for (int i = 0; i < MAX_PARTITIONS; i++)
-        mPartMinors[i] = -1;
+    if (mDiskNumParts > MAX_PARTITIONS)
+        mDiskNumParts = MAX_PARTITIONS;
+
+    int partmask = 0;
+    for (int i = 1; i <= mDiskNumParts; i++) {
+        mPartMinors[i-1] = -1;
+        partmask |= (1 << i);
+    }
+    mPendingPartCount = partmask;
 
     if (getState() != Volume::State_Formatting) {
         if (mDiskNumParts == 0) {
