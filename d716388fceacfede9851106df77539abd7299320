@@ -1,0 +1,27 @@
+{
+  "comments": [
+    {
+      "key": {
+        "uuid": "cb2b6d62_abd9d584",
+        "filename": "DirectVolume.cpp",
+        "patchSetId": 3
+      },
+      "lineNbr": 225,
+      "author": {
+        "id": 1000515
+      },
+      "writtenOn": "2014-12-23T14:35:31Z",
+      "side": 1,
+      "message": "This line (225) breaks sequencial partitions mapping.\nI will try to figure out how can I get it fixed without flags.",
+      "range": {
+        "startLine": 225,
+        "startChar": 8,
+        "endLine": 225,
+        "endChar": 19
+      },
+      "revId": "d716388fceacfede9851106df77539abd7299320",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    }
+  ]
+}
