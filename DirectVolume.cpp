@@ -211,8 +211,6 @@ void DirectVolume::handleDiskAdded(const char * /*devpath*/,
     }
 
     mPendingPartCount = mDiskNumParts;
-    for (int i = 0; i < MAX_PARTITIONS; i++)
-        mPartMinors[i] = -1;
 
     if (mDiskNumParts == 0) {
 #ifdef PARTITION_DEBUG
