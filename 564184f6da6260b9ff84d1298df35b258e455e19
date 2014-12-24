@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "key": {
+        "uuid": "cb2b6d62_0b98217b",
+        "filename": "DirectVolume.cpp",
+        "patchSetId": 5
+      },
+      "lineNbr": 225,
+      "author": {
+        "id": 1000032
+      },
+      "writtenOn": "2014-12-24T02:08:14Z",
+      "side": 1,
+      "message": "This for loop is all that\u0027s killing it. Seems that because the sdcard slot is considered a complete different disk by Vold, when it runs this block of code again, the mPartMinors array gets reset completely.\n\nThis doesn\u0027t seem to affect maxwen since on his device, the external card is considered as just another partition on the same disk.",
+      "revId": "564184f6da6260b9ff84d1298df35b258e455e19",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    },
+    {
+      "key": {
+        "uuid": "cb2b6d62_2b95e543",
+        "filename": "DirectVolume.cpp",
+        "patchSetId": 5
+      },
+      "lineNbr": 343,
+      "author": {
+        "id": 1000032
+      },
+      "writtenOn": "2014-12-24T02:08:14Z",
+      "side": 1,
+      "message": "See above comment.",
+      "revId": "564184f6da6260b9ff84d1298df35b258e455e19",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    }
+  ]
+}
