@@ -19,6 +19,24 @@
     },
     {
       "key": {
+        "uuid": "cb2b6d62_8b8c113b",
+        "filename": "DirectVolume.cpp",
+        "patchSetId": 5
+      },
+      "lineNbr": 225,
+      "author": {
+        "id": 1000032
+      },
+      "writtenOn": "2014-12-24T03:46:35Z",
+      "side": 1,
+      "message": "Actually, looking at it a bit further, it seems that we have a few \"partitions\" that identify themselves as disks, causing this block of code to be run unnecessarily for a few more times, causing the mPartMinor array to be reset.\n\nAlso, looks like when external storage is mounted, it runs on a separate thread, and starts with mPartMinors being a clean slate, and separate from internal storage.\n\nAll these things considered, we can therefore probably remove this for loop, since it\u0027s honestly not doing any good.",
+      "parentUuid": "cb2b6d62_0b98217b",
+      "revId": "564184f6da6260b9ff84d1298df35b258e455e19",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    },
+    {
+      "key": {
         "uuid": "cb2b6d62_2b95e543",
         "filename": "DirectVolume.cpp",
         "patchSetId": 5
