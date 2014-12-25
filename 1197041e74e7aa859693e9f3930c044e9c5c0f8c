@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "key": {
+        "uuid": "cb2b6d62_8bea5171",
+        "filename": "DirectVolume.cpp",
+        "patchSetId": 1
+      },
+      "lineNbr": 270,
+      "author": {
+        "id": 1000032
+      },
+      "writtenOn": "2014-12-25T06:18:05Z",
+      "side": 1,
+      "message": "We might need to remove mPartMinors[part_num - 1] \u003d\u003d -1 as part of the if condition to ensure that handleDiskChanged would work. Not sure right now. Can anyone think of a way to trigger that function reliably?",
+      "revId": "1197041e74e7aa859693e9f3930c044e9c5c0f8c",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    }
+  ]
+}
