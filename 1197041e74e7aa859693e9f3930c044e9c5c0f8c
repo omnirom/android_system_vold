@@ -16,6 +16,24 @@
       "revId": "1197041e74e7aa859693e9f3930c044e9c5c0f8c",
       "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
       "unresolved": false
+    },
+    {
+      "key": {
+        "uuid": "cb2b6d62_4b321909",
+        "filename": "DirectVolume.cpp",
+        "patchSetId": 1
+      },
+      "lineNbr": 270,
+      "author": {
+        "id": 1000515
+      },
+      "writtenOn": "2014-12-26T02:09:43Z",
+      "side": 1,
+      "message": "Did you still getting erros? if mPartMinors array is already initialized as -1 earlier then not sure but I can\u0027t see problems using it as part of condition.",
+      "parentUuid": "cb2b6d62_8bea5171",
+      "revId": "1197041e74e7aa859693e9f3930c044e9c5c0f8c",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
     }
   ]
 }
