@@ -34,6 +34,24 @@
       "revId": "1197041e74e7aa859693e9f3930c044e9c5c0f8c",
       "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
       "unresolved": false
+    },
+    {
+      "key": {
+        "uuid": "cb2b6d62_8b1c117d",
+        "filename": "DirectVolume.cpp",
+        "patchSetId": 1
+      },
+      "lineNbr": 270,
+      "author": {
+        "id": 1000032
+      },
+      "writtenOn": "2014-12-26T02:33:11Z",
+      "side": 1,
+      "message": "No I\u0027m not, but when we boot our devices, we only go through the handleDiskAdded function, with the array being all -1s. However, for disk changed, it\u0027ll go through the handleDiskChanged function, at which point the array might not be all -1s, and that if condition might mess things up. \n\nAgain, I have no idea how to trigger those function calls, so I can\u0027t verify my theory.",
+      "parentUuid": "cb2b6d62_4b321909",
+      "revId": "1197041e74e7aa859693e9f3930c044e9c5c0f8c",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
     }
   ]
 }
