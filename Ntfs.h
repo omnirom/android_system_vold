@@ -1,5 +1,6 @@
 /*
- * Copyright (C) 2013 The Android Open Source Project
+ * Copyright (C) 2008 The Android Open Source Project
+ * Copyright (C) 2012 Freescale Semiconductor, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,16 +15,19 @@
  * limitations under the License.
  */
 
-#include <sys/ioctl.h>
-#include <linux/fs.h>
+#ifndef _NTFS_H
+#define _NTFS_H
 
-unsigned int get_blkdev_size(int fd)
-{
-  unsigned long nr_sec;
+#include <unistd.h>
 
-  if ( (ioctl(fd, BLKGETSIZE, &nr_sec)) == -1) {
-    nr_sec = 0;
-  }
+class Ntfs {
+public:
+    static int check(const char *fsPath);
+    static int doMount(const char *fsPath, const char *mountPoint,
+                       bool ro, bool remount, bool executable,
+                       int ownerUid, int ownerGid, int permMask,
+                       bool createLost);
+    static int format(const char *fsPath, bool wipe);
+};
 
-  return (unsigned int)nr_sec;
-}
+#endif

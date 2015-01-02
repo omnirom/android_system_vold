@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 The Android Open Source Project
+ * Copyright (C) 2013 The CyanogenMod Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,16 +14,17 @@
  * limitations under the License.
  */
 
-#include <sys/ioctl.h>
-#include <linux/fs.h>
+#ifndef _VOLD_H
+#define _VOLD_H
 
-unsigned int get_blkdev_size(int fd)
-{
-  unsigned long nr_sec;
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-  if ( (ioctl(fd, BLKGETSIZE, &nr_sec)) == -1) {
-    nr_sec = 0;
-  }
+int vold_main();
 
-  return (unsigned int)nr_sec;
+#ifdef __cplusplus
 }
+#endif
+#endif
+

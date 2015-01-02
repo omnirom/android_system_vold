@@ -54,6 +54,7 @@
 #include "cryptfs.h"
 
 #define MASS_STORAGE_FILE_PATH  "/sys/class/android_usb/android0/f_mass_storage/lun/file"
+#define UICC0_MASS_STORAGE_PATH  "/sys/class/android_usb/android0/f_mass_storage/uicc0/file"
 
 #define ROUND_UP_POWER_OF_2(number, po2) (((!!(number & ((1U << po2) - 1))) << po2)\
                                          + (number & (~((1U << po2) - 1))))
@@ -233,6 +234,16 @@ int VolumeManager::stop() {
 }
 
 int VolumeManager::addVolume(Volume *v) {
+    // If entry is duplicated then mark isValid to false for both of them.
+    // Mark the valid entry on the first insertion of the card on handleBlockEvent()
+    VolumeCollection::iterator it;
+    for (it = mVolumes->begin(); it != mVolumes->end(); ++it) {
+        if(!strncmp((*it)->getLabel(), v->getLabel(), strlen((*it)->getLabel()))) {
+            (*it)->setValidSysfs(false);
+            v->setValidSysfs(false);
+        }
+    }
+
     mVolumes->push_back(v);
     return 0;
 }
@@ -265,12 +276,15 @@ int VolumeManager::listVolumes(SocketClient *cli, bool broadcast) {
     char msg[256];
 
     for (i = mVolumes->begin(); i != mVolumes->end(); ++i) {
-        char *buffer;
-        asprintf(&buffer, "%s %s %d",
-                 (*i)->getLabel(), (*i)->getFuseMountpoint(),
-                 (*i)->getState());
-        cli->sendMsg(ResponseCode::VolumeListResult, buffer, false);
-        free(buffer);
+        if ((*i)->isValidSysfs()) {
+            char *buffer;
+            asprintf(&buffer, "%s %s %d",
+                     (*i)->getLabel(), (*i)->getFuseMountpoint(),
+                     (*i)->getState());
+            cli->sendMsg(ResponseCode::VolumeListResult, buffer, false);
+            free(buffer);
+        }
+
         if (broadcast) {
             if((*i)->getUuid()) {
                 snprintf(msg, sizeof(msg), "%s %s \"%s\"", (*i)->getLabel(),
@@ -552,7 +566,7 @@ int VolumeManager::createAsec(const char *id, unsigned int numSectors, const cha
 
         int mountStatus;
         if (usingExt4) {
-            mountStatus = Ext4::doMount(dmDevice, mountPoint, false, false, false);
+            mountStatus = Ext4::doMount(dmDevice, mountPoint, false, false, false, false);
         } else {
             mountStatus = Fat::doMount(dmDevice, mountPoint, false, false, false, ownerUid, 0, 0000,
                     false);
@@ -771,7 +785,7 @@ int VolumeManager::finalizeAsec(const char *id) {
 
     int result = 0;
     if (sb.c_opts & ASEC_SB_C_OPTS_EXT4) {
-        result = Ext4::doMount(loopDevice, mountPoint, true, true, true);
+        result = Ext4::doMount(loopDevice, mountPoint, true, true, true, false);
     } else {
         result = Fat::doMount(loopDevice, mountPoint, true, true, true, 0, 0, 0227, false);
     }
@@ -840,7 +854,8 @@ int VolumeManager::fixupAsecPermissions(const char *id, gid_t gid, const char* f
     int ret = Ext4::doMount(loopDevice, mountPoint,
             false /* read-only */,
             true  /* remount */,
-            false /* executable */);
+            false /* executable */,
+            false /* sdcard */);
     if (ret) {
         SLOGE("Unable remount to fix permissions for %s (%s)", id, strerror(errno));
         return -1;
@@ -902,7 +917,8 @@ int VolumeManager::fixupAsecPermissions(const char *id, gid_t gid, const char* f
     result |= Ext4::doMount(loopDevice, mountPoint,
             true /* read-only */,
             true /* remount */,
-            true /* execute */);
+            true /* execute */,
+            false /* sdcard */);
 
     if (result) {
         SLOGE("ASEC fix permissions failed (%s)", strerror(errno));
@@ -1339,7 +1355,7 @@ int VolumeManager::mountAsec(const char *id, const char *key, int ownerUid, bool
 
     int result;
     if (sb.c_opts & ASEC_SB_C_OPTS_EXT4) {
-        result = Ext4::doMount(dmDevice, mountPoint, readOnly, false, readOnly);
+        result = Ext4::doMount(dmDevice, mountPoint, readOnly, false, readOnly, false);
     } else {
         result = Fat::doMount(dmDevice, mountPoint, readOnly, false, readOnly, ownerUid, 0, 0222, false);
     }
@@ -1364,9 +1380,11 @@ Volume* VolumeManager::getVolumeForFile(const char *fileName) {
     VolumeCollection::iterator i;
 
     for (i = mVolumes->begin(); i != mVolumes->end(); ++i) {
-        const char* mountPoint = (*i)->getFuseMountpoint();
-        if (!strncmp(fileName, mountPoint, strlen(mountPoint))) {
-            return *i;
+        if ((*i)->isValidSysfs()) {
+            const char* mountPoint = (*i)->getFuseMountpoint();
+            if (!strncmp(fileName, mountPoint, strlen(mountPoint))) {
+                return *i;
+            }
         }
     }
 
@@ -1594,6 +1612,18 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
         return -1;
     }
 
+    if (!strncmp(v->getLabel(), "uicc0", strlen("uicc0"))) {
+        if ((fd = open(UICC0_MASS_STORAGE_PATH, O_WRONLY)) < 0) {
+            SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
+            return -1;
+        }
+    } else {
+        if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
+            SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
+            return -1;
+        }
+    }
+
     if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
         SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
         return -1;
@@ -1688,8 +1718,10 @@ int VolumeManager::getNumDirectVolumes(void) {
     int n=0;
 
     for (i = mVolumes->begin(); i != mVolumes->end(); ++i) {
-        if ((*i)->getShareDevice() != (dev_t)0) {
-            n++;
+        if ((*i)->isValidSysfs()) {
+            if ((*i)->getShareDevice() != (dev_t)0) {
+                n++;
+            }
         }
     }
     return n;
@@ -1706,18 +1738,20 @@ int VolumeManager::getDirectVolumeList(struct volume_info *vol_list) {
     dev_t d;
 
     for (i = mVolumes->begin(); i != mVolumes->end(); ++i) {
-        if ((d=(*i)->getShareDevice()) != (dev_t)0) {
-            (*i)->getVolInfo(&vol_list[n]);
-            snprintf(vol_list[n].blk_dev, sizeof(vol_list[n].blk_dev),
-                     "/dev/block/vold/%d:%d", major(d), minor(d));
-            n++;
+        if ((*i)->isValidSysfs()) {
+            if ((d=(*i)->getShareDevice()) != (dev_t)0) {
+                (*i)->getVolInfo(&vol_list[n]);
+                snprintf(vol_list[n].blk_dev, sizeof(vol_list[n].blk_dev),
+                         "/dev/block/vold/%d:%d", major(d), minor(d));
+                n++;
+            }
         }
     }
 
     return 0;
 }
 
-int VolumeManager::unmountVolume(const char *label, bool force, bool revert) {
+int VolumeManager::unmountVolume(const char *label, bool force, bool revert, bool detach) {
     Volume *v = lookupVolume(label);
 
     if (!v) {
@@ -1739,7 +1773,7 @@ int VolumeManager::unmountVolume(const char *label, bool force, bool revert) {
 
     cleanupAsec(v, force);
 
-    return v->unmountVol(force, revert);
+    return v->unmountVol(force, revert, detach);
 }
 
 extern "C" int vold_unmountAllAsecs(void) {
@@ -1805,12 +1839,14 @@ Volume *VolumeManager::lookupVolume(const char *label) {
     VolumeCollection::iterator i;
 
     for (i = mVolumes->begin(); i != mVolumes->end(); ++i) {
-        if (label[0] == '/') {
-            if (!strcmp(label, (*i)->getFuseMountpoint()))
-                return (*i);
-        } else {
-            if (!strcmp(label, (*i)->getLabel()))
-                return (*i);
+        if ((*i)->isValidSysfs()) {
+            if (label[0] == '/') {
+                if (!strcmp(label, (*i)->getFuseMountpoint()))
+                    return (*i);
+            } else {
+                if (!strcmp(label, (*i)->getLabel()))
+                    return (*i);
+            }
         }
     }
     return NULL;
