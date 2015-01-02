@@ -210,10 +210,6 @@ void DirectVolume::handleDiskAdded(const char * /*devpath*/,
         mDiskNumParts = 1;
     }
 
-    mPendingPartCount = mDiskNumParts;
-    for (int i = 0; i < MAX_PARTITIONS; i++)
-        mPartMinors[i] = -1;
-
     if (mDiskNumParts == 0) {
 #ifdef PARTITION_DEBUG
         SLOGD("Dv::diskIns - No partitions - good to go son!");
@@ -268,7 +264,7 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
     SLOGD("Dv:partAdd: part_num = %d, minor = %d\n", part_num, minor);
 #endif
     if (part_num >= MAX_PARTITIONS) {
-        SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d)\n", part_num, MAX_PARTITIONS-1);
+        SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d)\n", part_num, MAX_PARTITIONS);
     } else {
         if ((mPartMinors[part_num - 1] == -1) && mPendingPartCount)
             mPendingPartCount--;
