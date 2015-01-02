@@ -27,6 +27,7 @@ class Volume {
 private:
     int mState;
     int mFlags;
+    char* mOpts;
 
 public:
     static const int State_Init       = -1;
@@ -68,7 +69,7 @@ public:
     virtual ~Volume();
 
     int mountVol();
-    int unmountVol(bool force, bool revert);
+    int unmountVol(bool force, bool revert, bool detach=false);
     int formatVol(bool wipe);
 
     const char* getLabel() { return mLabel; }
@@ -80,6 +81,10 @@ public:
     /* Mountpoint of the raw volume */
     virtual const char *getMountpoint() = 0;
     virtual const char *getFuseMountpoint() = 0;
+
+    /* validity of the mount points */
+    virtual void setValidSysfs(bool val) = 0;
+    virtual bool isValidSysfs() = 0;
 
     virtual int handleBlockEvent(NetlinkEvent *evt);
     virtual dev_t getDiskDevice();
@@ -106,7 +111,7 @@ private:
     int initializeMbr(const char *deviceNode);
     bool isMountpointMounted(const char *path);
     int mountAsecExternal();
-    int doUnmount(const char *path, bool force);
+    int doUnmount(const char *path, bool force, bool detach);
     int extractMetadata(const char* devicePath);
 };
 

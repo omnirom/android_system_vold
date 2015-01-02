@@ -80,6 +80,7 @@ DirectVolume::DirectVolume(VolumeManager *vm, const fstab_rec* rec, int flags) :
     mDiskMinor = -1;
     mDiskNumParts = 0;
     mIsDecrypted = 0;
+    mIsValid = true;
 
     if (strcmp(rec->mount_point, "auto") != 0) {
         ALOGE("Vold managed volumes must have auto mount point; ignoring %s",
@@ -88,10 +89,16 @@ DirectVolume::DirectVolume(VolumeManager *vm, const fstab_rec* rec, int flags) :
 
     char mount[PATH_MAX];
 
+#ifdef MINIVOLD
+    // In recovery, directly mount to /storage/* since we have no fuse daemon
+    snprintf(mount, PATH_MAX, "%s/%s", Volume::FUSE_DIR, rec->label);
+    mMountpoint = mFuseMountpoint = strdup(mount);
+#else
     snprintf(mount, PATH_MAX, "%s/%s", Volume::MEDIA_DIR, rec->label);
     mMountpoint = strdup(mount);
     snprintf(mount, PATH_MAX, "%s/%s", Volume::FUSE_DIR, rec->label);
     mFuseMountpoint = strdup(mount);
+#endif
 
     setState(Volume::State_NoMedia);
 }
@@ -115,14 +122,6 @@ dev_t DirectVolume::getDiskDevice() {
 
 dev_t DirectVolume::getShareDevice() {
     if (mPartIdx != -1) {
-#ifdef VOLD_DISC_HAS_MULTIPLE_MAJORS
-        int major = getMajorNumberForBadPartition(mPartIdx);
-        if(major != -1) {
-            SLOGE("getShareDevice() returning correct major: %d, minor: %d", major, mPartMinors[mPartIdx - 1]);
-            return MKDEV(major, mPartMinors[mPartIdx - 1]);
-        }
-        else
-#endif
         return MKDEV(mDiskMajor, mPartIdx);
     } else {
         return MKDEV(mDiskMajor, mDiskMinor);
@@ -137,12 +136,38 @@ void DirectVolume::handleVolumeUnshared() {
     setState(Volume::State_Idle);
 }
 
+int DirectVolume::getUICCVolumeNum(const char *dp) {
+    int mVolNum = -1;
+    if (strstr(dp, ":0:0:0"))
+        mVolNum = 0;
+    else if (strstr(dp, ":0:0:1"))
+        mVolNum = 1;
+
+    return mVolNum;
+}
+
 int DirectVolume::handleBlockEvent(NetlinkEvent *evt) {
     const char *dp = evt->findParam("DEVPATH");
 
     PathCollection::iterator  it;
     for (it = mPaths->begin(); it != mPaths->end(); ++it) {
         if ((*it)->match(dp)) {
+
+            /* Check for UICC prefix in label */
+            if (strstr(getLabel(), "uicc")) {
+                char mLabel[15];
+                int mNum = getUICCVolumeNum(dp);
+                if (mNum < 0) {
+                    SLOGE("Invalid uicc volume number");
+                    continue;
+                }
+
+                snprintf(mLabel, sizeof(mLabel), "uicc%d", mNum);
+                if (strncmp(getLabel(), mLabel, strlen(mLabel)) != 0)
+                    continue;
+            }
+            setValidSysfs(true);
+
             /* We can handle this disk */
             int action = evt->getAction();
             const char *devtype = evt->findParam("DEVTYPE");
@@ -211,8 +236,7 @@ void DirectVolume::handleDiskAdded(const char * /*devpath*/,
     }
 
     mPendingPartCount = mDiskNumParts;
-    for (int i = 0; i < MAX_PARTITIONS; i++)
-        mPartMinors[i] = -1;
+
 
     if (mDiskNumParts == 0) {
 #ifdef PARTITION_DEBUG
@@ -267,8 +291,8 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
 #ifdef PARTITION_DEBUG
     SLOGD("Dv:partAdd: part_num = %d, minor = %d\n", part_num, minor);
 #endif
-    if (part_num >= MAX_PARTITIONS) {
-        SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d)\n", part_num, MAX_PARTITIONS-1);
+    if (part_num > MAX_PARTITIONS) {
+        SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d)\n", part_num, MAX_PARTITIONS);
     } else {
         if ((mPartMinors[part_num - 1] == -1) && mPendingPartCount)
             mPendingPartCount--;
@@ -347,6 +371,23 @@ void DirectVolume::handleDiskRemoved(const char * /*devpath*/,
              getLabel(), getFuseMountpoint(), major, minor);
     mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeDiskRemoved,
                                              msg, false);
+
+    if ((dev_t) MKDEV(major, minor) == mCurrentlyMountedKdev) {
+
+        bool providesAsec = (getFlags() & VOL_PROVIDES_ASEC) != 0;
+        if (providesAsec && mVm->cleanupAsec(this, true)) {
+            SLOGE("Failed to cleanup ASEC - unmount will probably fail!");
+        }
+
+        if (Volume::unmountVol(true, false, false)) {
+            SLOGE("Failed to unmount volume on bad removal (%s)",
+                 strerror(errno));
+            // XXX: At this point we're screwed for now
+        } else {
+            SLOGD("Crisis averted");
+        }
+    }
+
     setState(Volume::State_NoMedia);
 }
 
@@ -385,7 +426,7 @@ void DirectVolume::handlePartitionRemoved(const char * /*devpath*/,
         mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeBadRemoval,
                                              msg, false);
 
-        if (Volume::unmountVol(true, false)) {
+        if (Volume::unmountVol(true, false, false)) {
             SLOGE("Failed to unmount volume on bad removal (%s)", 
                  strerror(errno));
             // XXX: At this point we're screwed for now
@@ -417,7 +458,7 @@ int DirectVolume::getDeviceNodes(dev_t *devs, int max) {
         // If the disk has no partitions, try the disk itself
         if (!mDiskNumParts) {
             devs[0] = MKDEV(mDiskMajor, mDiskMinor);
-            SLOGD("Disc has only one partition.");
+			SLOGD("Disc has only one partition.");
             return 1;
         }
 
