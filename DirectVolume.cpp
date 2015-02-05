@@ -345,6 +345,8 @@ void DirectVolume::handleDiskRemoved(const char * /*devpath*/,
              getLabel(), getFuseMountpoint(), major, minor);
     mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeDiskRemoved,
                                              msg, false);
+    for (int i = 0; i < MAX_PARTITIONS; i++)
+        mPartMinors[i] = -1;
     setState(Volume::State_NoMedia);
 }
 
