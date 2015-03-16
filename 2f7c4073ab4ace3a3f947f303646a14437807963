@@ -1,0 +1,27 @@
+{
+  "comments": [
+    {
+      "key": {
+        "uuid": "6b22818b_1c385b39",
+        "filename": "Android.mk",
+        "patchSetId": 1
+      },
+      "lineNbr": 96,
+      "author": {
+        "id": 1000515
+      },
+      "writtenOn": "2015-03-16T19:59:14Z",
+      "side": 1,
+      "message": "also, we can drop this line",
+      "range": {
+        "startLine": 96,
+        "startChar": 16,
+        "endLine": 96,
+        "endChar": 17
+      },
+      "revId": "2f7c4073ab4ace3a3f947f303646a14437807963",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    }
+  ]
+}
