@@ -92,8 +92,7 @@ LOCAL_SRC_FILES := \
 	$(common_src_files)
 
 LOCAL_C_INCLUDES := $(common_c_includes)
-
-LOCAL_CFLAGS := -Werror=format
+LOCAL_CFLAGS := $(common_cflags)
 
 ifeq ($(TARGET_HW_DISK_ENCRYPTION),true)
 LOCAL_C_INCLUDES += $(TARGET_CRYPTFS_HW_PATH)
