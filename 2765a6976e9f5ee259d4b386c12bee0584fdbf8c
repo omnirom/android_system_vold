@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "key": {
+        "uuid": "f8eba960_4a0d07ee",
+        "filename": "main.cpp",
+        "patchSetId": 3
+      },
+      "lineNbr": 186,
+      "author": {
+        "id": 1000026
+      },
+      "writtenOn": "2015-07-04T11:51:12Z",
+      "side": 1,
+      "message": "maybe its too hot but I am failing to get this\nits #ifned of _NON_.... :)\nWhy not make it sound more logical then a double denial :)",
+      "revId": "2765a6976e9f5ee259d4b386c12bee0584fdbf8c",
+      "serverId": "56841c99-7c94-43d4-bf0b-cb4707e66d55",
+      "unresolved": false
+    }
+  ]
+}
