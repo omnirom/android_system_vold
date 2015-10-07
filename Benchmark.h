@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 The Android Open Source Project
+ * Copyright (C) 2015 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,11 +14,21 @@
  * limitations under the License.
  */
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-    int fstrim_filesystems(int deep_trim);
-#ifdef __cplusplus
-}
-#endif
+#ifndef ANDROID_VOLD_BENCHMARK_H
+#define ANDROID_VOLD_BENCHMARK_H
 
+#include <utils/Errors.h>
+#include <utils/Timers.h>
+
+#include <string>
+
+namespace android {
+namespace vold {
+
+/* Benchmark a private volume mounted at the given path */
+nsecs_t BenchmarkPrivate(const std::string& path);
+
+}  // namespace vold
+}  // namespace android
+
+#endif

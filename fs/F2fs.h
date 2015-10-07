@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 The Android Open Source Project
+ * Copyright (C) 2015 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,19 +14,25 @@
  * limitations under the License.
  */
 
-#ifndef _VOLDUTIL_H
-#define _VOLDUTIL_H
+#ifndef ANDROID_VOLD_F2FS_H
+#define ANDROID_VOLD_F2FS_H
 
-#include <sys/cdefs.h>
+#include <utils/Errors.h>
 
-#ifndef HELPER_PATH
-#define HELPER_PATH "/system/bin/"
-#endif
+#include <string>
 
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof(*(a)))
+namespace android {
+namespace vold {
+namespace f2fs {
 
-__BEGIN_DECLS
-void get_blkdev_size(int fd, unsigned long* nr_sec);
-__END_DECLS
+bool IsSupported();
+
+status_t Check(const std::string& source);
+status_t Mount(const std::string& source, const std::string& target);
+status_t Format(const std::string& source);
+
+}  // namespace f2fs
+}  // namespace vold
+}  // namespace android
 
 #endif

@@ -14,25 +14,11 @@
  * limitations under the License.
  */
 
-#define LOG_TAG "VoldCheckBattery"
-#include <cutils/log.h>
+#ifndef _SEHANDLE_H
+#define _SEHANDLE_H
 
-#include <binder/IServiceManager.h>
-#include <batteryservice/IBatteryPropertiesRegistrar.h>
+#include <selinux/android.h>
 
-using namespace android;
+extern struct selabel_handle *sehandle;
 
-extern "C"
-{
-    int is_battery_ok_to_start()
-    {
-      // Bug 16868177 exists to purge this code completely
-      return true; //is_battery_ok(START_THRESHOLD);
-    }
-
-    int is_battery_ok_to_continue()
-    {
-      // Bug 16868177 exists to purge this code completely
-      return true; //is_battery_ok(CONTINUE_THRESHOLD);
-    }
-}
+#endif

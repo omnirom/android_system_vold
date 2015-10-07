@@ -37,21 +37,35 @@
 
 #define LOG_TAG "Vold"
 
+#include <base/logging.h>
+#include <base/stringprintf.h>
 #include <cutils/log.h>
 #include <cutils/properties.h>
+#include <selinux/selinux.h>
 
 #include <logwrap/logwrap.h>
 
-#include "Fat.h"
+#include "Vfat.h"
+#include "Utils.h"
 #include "VoldUtil.h"
 
-static char FSCK_MSDOS_PATH[] = "/system/bin/fsck_msdos";
-static char MKDOSFS_PATH[] = "/system/bin/newfs_msdos";
-extern "C" int mount(const char *, const char *, const char *, unsigned long, const void *);
+using android::base::StringPrintf;
 
-int Fat::check(const char *fsPath) {
-    bool rw = true;
-    if (access(FSCK_MSDOS_PATH, X_OK)) {
+namespace android {
+namespace vold {
+namespace vfat {
+
+static const char* kMkfsPath = "/system/bin/newfs_msdos";
+static const char* kFsckPath = "/system/bin/fsck_msdos";
+
+bool IsSupported() {
+    return access(kMkfsPath, X_OK) == 0
+            && access(kFsckPath, X_OK) == 0
+            && IsFilesystemSupported("vfat");
+}
+
+status_t Check(const std::string& source) {
+    if (access(kFsckPath, X_OK)) {
         SLOGW("Skipping fs checks\n");
         return 0;
     }
@@ -59,30 +73,22 @@ int Fat::check(const char *fsPath) {
     int pass = 1;
     int rc = 0;
     do {
-        const char *args[4];
-        int status;
-        args[0] = FSCK_MSDOS_PATH;
-        args[1] = "-p";
-        args[2] = "-f";
-        args[3] = fsPath;
+        std::vector<std::string> cmd;
+        cmd.push_back(kFsckPath);
+        cmd.push_back("-p");
+        cmd.push_back("-f");
+        cmd.push_back(source);
 
-        rc = android_fork_execvp(ARRAY_SIZE(args), (char **)args, &status,
-                false, true);
-        if (rc != 0) {
+        // Fat devices are currently always untrusted
+        rc = ForkExecvp(cmd, sFsckUntrustedContext);
+
+        if (rc < 0) {
             SLOGE("Filesystem check failed due to logwrap error");
             errno = EIO;
             return -1;
         }
 
-        if (!WIFEXITED(status)) {
-            SLOGE("Filesystem check did not exit properly");
-            errno = EIO;
-            return -1;
-        }
-
-        status = WEXITSTATUS(status);
-
-        switch(status) {
+        switch(rc) {
         case 0:
             SLOGI("Filesystem check completed OK");
             return 0;
@@ -103,7 +109,7 @@ int Fat::check(const char *fsPath) {
             return -1;
 
         default:
-            SLOGE("Filesystem check failed (unknown exit code %d)", status);
+            SLOGE("Filesystem check failed (unknown exit code %d)", rc);
             errno = EIO;
             return -1;
         }
@@ -112,12 +118,15 @@ int Fat::check(const char *fsPath) {
     return 0;
 }
 
-int Fat::doMount(const char *fsPath, const char *mountPoint,
-                 bool ro, bool remount, bool executable,
-                 int ownerUid, int ownerGid, int permMask, bool createLost) {
+status_t Mount(const std::string& source, const std::string& target, bool ro,
+        bool remount, bool executable, int ownerUid, int ownerGid, int permMask,
+        bool createLost) {
     int rc;
     unsigned long flags;
     char mountData[255];
+
+    const char* c_source = source.c_str();
+    const char* c_target = target.c_str();
 
     flags = MS_NODEV | MS_NOSUID | MS_DIRSYNC;
 
@@ -143,17 +152,17 @@ int Fat::doMount(const char *fsPath, const char *mountPoint,
             "utf8,uid=%d,gid=%d,fmask=%o,dmask=%o,shortname=mixed",
             ownerUid, ownerGid, permMask, permMask);
 
-    rc = mount(fsPath, mountPoint, "vfat", flags, mountData);
+    rc = mount(c_source, c_target, "vfat", flags, mountData);
 
     if (rc && errno == EROFS) {
-        SLOGE("%s appears to be a read only filesystem - retrying mount RO", fsPath);
+        SLOGE("%s appears to be a read only filesystem - retrying mount RO", c_source);
         flags |= MS_RDONLY;
-        rc = mount(fsPath, mountPoint, "vfat", flags, mountData);
+        rc = mount(c_source, c_target, "vfat", flags, mountData);
     }
 
     if (rc == 0 && createLost) {
         char *lost_path;
-        asprintf(&lost_path, "%s/LOST.DIR", mountPoint);
+        asprintf(&lost_path, "%s/LOST.DIR", c_target);
         if (access(lost_path, F_OK)) {
             /*
              * Create a LOST.DIR in the root so we have somewhere to put
@@ -169,88 +178,42 @@ int Fat::doMount(const char *fsPath, const char *mountPoint,
     return rc;
 }
 
-int Fat::format(const char *fsPath, unsigned int numSectors, bool wipe) {
-    int fd;
-    const char *args[11];
-    int rc;
-    int status;
-
-    if (wipe) {
-        Fat::wipe(fsPath, numSectors);
-    }
-
-    args[0] = MKDOSFS_PATH;
-    args[1] = "-F";
-    args[2] = "32";
-    args[3] = "-O";
-    args[4] = "android";
-    args[5] = "-c";
-    args[6] = "64";
-    args[7] = "-A";
+status_t Format(const std::string& source, unsigned int numSectors) {
+    std::vector<std::string> cmd;
+    cmd.push_back(kMkfsPath);
+    cmd.push_back("-F");
+    cmd.push_back("32");
+    cmd.push_back("-O");
+    cmd.push_back("android");
+    cmd.push_back("-c");
+    cmd.push_back("64");
+    cmd.push_back("-A");
 
     if (numSectors) {
-        char tmp[32];
-        snprintf(tmp, sizeof(tmp), "%u", numSectors);
-        const char *size = tmp;
-        args[8] = "-s";
-        args[9] = size;
-        args[10] = fsPath;
-        rc = android_fork_execvp(ARRAY_SIZE(args), (char **)args, &status,
-                false, true);
-    } else {
-        args[8] = fsPath;
-        rc = android_fork_execvp(9, (char **)args, &status, false,
-                true);
+        cmd.push_back("-s");
+        cmd.push_back(StringPrintf("%u", numSectors));
     }
 
-    if (rc != 0) {
+    cmd.push_back(source);
+
+    int rc = ForkExecvp(cmd);
+    if (rc < 0) {
         SLOGE("Filesystem format failed due to logwrap error");
         errno = EIO;
         return -1;
     }
 
-    if (!WIFEXITED(status)) {
-        SLOGE("Filesystem format did not exit properly");
-        errno = EIO;
-        return -1;
-    }
-
-    status = WEXITSTATUS(status);
-
-    if (status == 0) {
+    if (rc == 0) {
         SLOGI("Filesystem formatted OK");
         return 0;
     } else {
-        SLOGE("Format failed (unknown exit code %d)", status);
+        SLOGE("Format failed (unknown exit code %d)", rc);
         errno = EIO;
         return -1;
     }
     return 0;
 }
 
-void Fat::wipe(const char *fsPath, unsigned int numSectors) {
-    int fd;
-    unsigned long long range[2];
-
-    fd = open(fsPath, O_RDWR);
-    if (fd >= 0) {
-        if (numSectors == 0) {
-            numSectors = get_blkdev_size(fd);
-        }
-        if (numSectors == 0) {
-            SLOGE("Fat wipe failed to determine size of %s", fsPath);
-            close(fd);
-            return;
-        }
-        range[0] = 0;
-        range[1] = (unsigned long long)numSectors * 512;
-        if (ioctl(fd, BLKDISCARD, &range) < 0) {
-            SLOGE("Fat wipe failed to discard blocks on %s", fsPath);
-        } else {
-            SLOGI("Fat wipe %d sectors on %s succeeded", numSectors, fsPath);
-        }
-        close(fd);
-    } else {
-        SLOGE("Fat wipe failed to open device %s", fsPath);
-    }
-}
+}  // namespace vfat
+}  // namespace vold
+}  // namespace android
