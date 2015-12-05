@@ -85,6 +85,10 @@ ifeq ($(TARGET_USERIMAGES_USE_EXT4), true)
   endif
 endif
 
+ifeq ($(TARGET_KERNEL_HAVE_EXFAT),true)
+vold_cflags += -DCONFIG_KERNEL_HAVE_EXFAT
+endif
+
 include $(CLEAR_VARS)
 
 LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk
@@ -115,10 +119,6 @@ LOCAL_INIT_RC := vold.rc
 LOCAL_C_INCLUDES := $(common_c_includes)
 LOCAL_CFLAGS := $(vold_cflags)
 LOCAL_CONLYFLAGS := $(vold_conlyflags)
-
-ifeq ($(TARGET_KERNEL_HAVE_EXFAT),true)
-LOCAL_CFLAGS += -DCONFIG_KERNEL_HAVE_EXFAT
-endif
 
 LOCAL_SHARED_LIBRARIES := $(common_shared_libraries)
 LOCAL_STATIC_LIBRARIES := $(common_static_libraries)
