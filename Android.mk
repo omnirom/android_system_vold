@@ -96,6 +96,10 @@ ifeq ($(TARGET_KERNEL_HAVE_NTFS),true)
 vold_cflags += -DCONFIG_KERNEL_HAVE_NTFS
 endif
 
+ifeq ($(TARGET_NO_MOUNT_CHECK),true)
+vold_cflags += -DCONFIG_NO_MOUNT_CHECK
+endif
+
 include $(CLEAR_VARS)
 
 LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk

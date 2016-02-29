@@ -77,6 +77,7 @@ status_t Check(const std::string& source, const std::string& target, bool truste
     long tmpmnt_flags = MS_NOATIME | MS_NOEXEC | MS_NOSUID;
     char *tmpmnt_opts = (char*) "nomblk_io_submit,errors=remount-ro";
 
+#ifndef CONFIG_NO_MOUNT_CHECK
     /*
      * First try to mount and unmount the filesystem.  We do this because
      * the kernel is more efficient than e2fsck in running the journal and
@@ -104,6 +105,7 @@ status_t Check(const std::string& source, const std::string& target, bool truste
             sleep(1);
         }
     }
+#endif
 
     /*
      * Some system images do not have e2fsck for licensing reasons
@@ -120,7 +122,10 @@ status_t Check(const std::string& source, const std::string& target, bool truste
         cmd.push_back("-y");
         cmd.push_back(c_source);
 
-        return ForkExecvp(cmd, trusted ? sFsckContext : sFsckUntrustedContext);
+        status_t res = ForkExecvp(cmd, trusted ? sFsckContext : sFsckUntrustedContext);
+        if (res != OK) {
+            ALOGD("Running %s on %s res=%d\n", kFsckPath, c_source, res);
+        }
     }
 
     return 0;
