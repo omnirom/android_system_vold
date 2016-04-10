@@ -94,12 +94,40 @@
 #define RETRY_MOUNT_ATTEMPTS 10
 #define RETRY_MOUNT_DELAY_SECONDS 1
 
+#ifdef CONFIG_HW_DISK_ENCRYPTION
+static int scrypt_keymaster(const char *passwd, const unsigned char *salt,
+                            unsigned char *ikey, void *params);
+
+static int get_keymaster_hw_fde_passwd(const char* passwd, unsigned char* newpw,
+                                  unsigned char* salt,
+                                  const struct crypt_mnt_ftr *ftr)
+{
+    /* if newpw updated, return 0
+     * if newpw not updated return -1
+     */
+    int rc = -1;
+
+    if (should_use_keymaster()) {
+        if (scrypt_keymaster(passwd, salt, newpw, (void*)ftr)) {
+            SLOGE("scrypt failed");
+        } else {
+            rc = 0;
+        }
+    }
+
+    return rc;
+}
+
+#endif
+
 char *me = "cryptfs";
 
 static unsigned char saved_master_key[KEY_LEN_BYTES];
 static char *saved_mount_point;
 static int  master_key_saved = 0;
 static struct crypt_persist_data *persist_data = NULL;
+
+static int previous_type;
 
 static int keymaster_init(keymaster0_device_t **keymaster0_dev,
                           keymaster1_device_t **keymaster1_dev)
@@ -3238,7 +3266,7 @@ int cryptfs_enable_default(char *howarg, int no_ui)
                           DEFAULT_PASSWORD, no_ui);
 }
 
-int cryptfs_changepw(int crypt_type, const char *newpw)
+int cryptfs_changepw(int crypt_type, const char *currentpw, const char *newpw)
 {
     if (e4crypt_crypto_complete(DATA_MNT_POINT) == 0) {
         return e4crypt_change_password(DATA_MNT_POINT, crypt_type,
@@ -3266,33 +3294,52 @@ int cryptfs_changepw(int crypt_type, const char *newpw)
         return -1;
     }
 
+#ifdef CONFIG_HW_DISK_ENCRYPTION
+    int rc1;
+    unsigned char tmp_curpw[32] = {0};
+    rc1 = get_keymaster_hw_fde_passwd(crypt_ftr.crypt_type == CRYPT_TYPE_DEFAULT ?
+                                      DEFAULT_PASSWORD : currentpw, tmp_curpw,
+                                      crypt_ftr.salt, &crypt_ftr);
+#endif
+
+
     crypt_ftr.crypt_type = crypt_type;
 
-    rc = encrypt_master_key(crypt_type == CRYPT_TYPE_DEFAULT ? DEFAULT_PASSWORD
-                                                        : newpw,
+    if (previous_type == CRYPT_TYPE_DEFAULT)
+        currentpw = DEFAULT_PASSWORD;
+    previous_type = crypt_type;
+
+    if (encrypt_master_key(crypt_type == CRYPT_TYPE_DEFAULT ? DEFAULT_PASSWORD
+                                                            : newpw,
                        crypt_ftr.salt,
                        saved_master_key,
                        crypt_ftr.master_key,
-                       &crypt_ftr);
-    if (rc) {
-        SLOGE("Encrypt master key failed: %d", rc);
+                       &crypt_ftr)) {
+        SLOGE("Error encrypting master key");
         return -1;
     }
+
     /* save the key */
     put_crypt_ftr_and_key(&crypt_ftr);
 
 #ifdef CONFIG_HW_DISK_ENCRYPTION
-    if (!strcmp((char *)crypt_ftr.crypto_type_name, "aes-xts")) {
-        if (crypt_type == CRYPT_TYPE_DEFAULT) {
-            int rc = update_hw_device_encryption_key(DEFAULT_PASSWORD, (char*) crypt_ftr.crypto_type_name);
-            SLOGD("Update hardware encryption key to default for crypt_type: %d. rc = %d", crypt_type, rc);
-            if (!rc)
-                return -1;
+    int ret, rc2;
+    unsigned char tmp_newpw[32] = {0};
+
+    rc2 = get_keymaster_hw_fde_passwd(crypt_type == CRYPT_TYPE_DEFAULT ?
+                                DEFAULT_PASSWORD : newpw , tmp_newpw,
+                                crypt_ftr.salt, &crypt_ftr);
+
+    if (is_hw_disk_encryption((char*)crypt_ftr.crypto_type_name)) {
+        ret = update_hw_device_encryption_key(
+                rc1 ? (previous_type == CRYPT_TYPE_DEFAULT ? DEFAULT_PASSWORD : currentpw) : (const char*)tmp_curpw,
+                rc2 ? (crypt_type == CRYPT_TYPE_DEFAULT ? DEFAULT_PASSWORD : newpw): (const char*)tmp_newpw,
+                                    (char*)crypt_ftr.crypto_type_name);
+        if (ret) {
+            SLOGE("Error updating device encryption hardware key ret %d", ret);
+            return -1;
         } else {
-            int rc = update_hw_device_encryption_key(newpw, (char*) crypt_ftr.crypto_type_name);
-            SLOGD("Update hardware encryption key for crypt_type: %d. rc = %d", crypt_type, rc);
-            if (!rc)
-                return -1;
+            SLOGI("Encryption hardware key updated");
         }
     }
 #endif
