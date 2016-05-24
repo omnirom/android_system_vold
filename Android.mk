@@ -127,6 +127,7 @@ LOCAL_CFLAGS := $(vold_cflags)
 LOCAL_CONLYFLAGS := $(vold_conlyflags)
 
 ifeq ($(TARGET_HW_DISK_ENCRYPTION),true)
+TARGET_CRYPTFS_HW_PATH ?= device/qcom/common/cryptfs_hw
 LOCAL_C_INCLUDES += $(TARGET_CRYPTFS_HW_PATH)
 common_shared_libraries += libcryptfs_hw
 LOCAL_CFLAGS += -DCONFIG_HW_DISK_ENCRYPTION
