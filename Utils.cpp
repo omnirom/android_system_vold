@@ -21,9 +21,9 @@
 #include "fs/Exfat.h"
 #include "fs/Ntfs.h"
 
-#include <base/file.h>
-#include <base/logging.h>
-#include <base/stringprintf.h>
+#include <android-base/file.h>
+#include <android-base/logging.h>
+#include <android-base/stringprintf.h>
 #include <cutils/fs.h>
 #include <cutils/properties.h>
 #include <private/android_filesystem_config.h>
@@ -555,8 +555,87 @@ done:
     return res;
 }
 
+static bool isValidFilename(const std::string& name) {
+    if (name.empty() || (name == ".") || (name == "..")
+            || (name.find('/') != std::string::npos)) {
+        return false;
+    } else {
+        return true;
+    }
+}
+
 std::string BuildKeyPath(const std::string& partGuid) {
     return StringPrintf("%s/expand_%s.key", kKeyPath, partGuid.c_str());
+}
+
+std::string BuildDataSystemLegacyPath(userid_t userId) {
+    return StringPrintf("%s/system/users/%u", BuildDataPath(nullptr).c_str(), userId);
+}
+
+std::string BuildDataSystemCePath(userid_t userId) {
+    return StringPrintf("%s/system_ce/%u", BuildDataPath(nullptr).c_str(), userId);
+}
+
+std::string BuildDataSystemDePath(userid_t userId) {
+    return StringPrintf("%s/system_de/%u", BuildDataPath(nullptr).c_str(), userId);
+}
+
+std::string BuildDataMiscLegacyPath(userid_t userId) {
+    return StringPrintf("%s/misc/user/%u", BuildDataPath(nullptr).c_str(), userId);
+}
+
+std::string BuildDataMiscCePath(userid_t userId) {
+    return StringPrintf("%s/misc_ce/%u", BuildDataPath(nullptr).c_str(), userId);
+}
+
+std::string BuildDataMiscDePath(userid_t userId) {
+    return StringPrintf("%s/misc_de/%u", BuildDataPath(nullptr).c_str(), userId);
+}
+
+// Keep in sync with installd (frameworks/native/cmds/installd/utils.h)
+std::string BuildDataProfilesDePath(userid_t userId) {
+    return StringPrintf("%s/misc/profiles/cur/%u", BuildDataPath(nullptr).c_str(), userId);
+}
+
+std::string BuildDataProfilesForeignDexDePath(userid_t userId) {
+    std::string profiles_path = BuildDataProfilesDePath(userId);
+    return StringPrintf("%s/foreign-dex", profiles_path.c_str());
+}
+
+std::string BuildDataPath(const char* volumeUuid) {
+    // TODO: unify with installd path generation logic
+    if (volumeUuid == nullptr) {
+        return "/data";
+    } else {
+        CHECK(isValidFilename(volumeUuid));
+        return StringPrintf("/mnt/expand/%s", volumeUuid);
+    }
+}
+
+std::string BuildDataMediaCePath(const char* volumeUuid, userid_t userId) {
+    // TODO: unify with installd path generation logic
+    std::string data(BuildDataPath(volumeUuid));
+    return StringPrintf("%s/media/%u", data.c_str(), userId);
+}
+
+std::string BuildDataUserCePath(const char* volumeUuid, userid_t userId) {
+    // TODO: unify with installd path generation logic
+    std::string data(BuildDataPath(volumeUuid));
+    if (volumeUuid == nullptr) {
+        if (userId == 0) {
+            return StringPrintf("%s/data", data.c_str());
+        } else {
+            return StringPrintf("%s/user/%u", data.c_str(), userId);
+        }
+    } else {
+        return StringPrintf("%s/user/%u", data.c_str(), userId);
+    }
+}
+
+std::string BuildDataUserDePath(const char* volumeUuid, userid_t userId) {
+    // TODO: unify with installd path generation logic
+    std::string data(BuildDataPath(volumeUuid));
+    return StringPrintf("%s/user_de/%u", data.c_str(), userId);
 }
 
 dev_t GetDevice(const std::string& path) {
@@ -573,6 +652,36 @@ std::string DefaultFstabPath() {
     char hardware[PROPERTY_VALUE_MAX];
     property_get("ro.hardware", hardware, "");
     return StringPrintf("/fstab.%s", hardware);
+}
+
+status_t SaneReadLinkAt(int dirfd, const char* path, char* buf, size_t bufsiz) {
+    ssize_t len = readlinkat(dirfd, path, buf, bufsiz);
+    if (len < 0) {
+        return -1;
+    } else if (len == (ssize_t) bufsiz) {
+        return -1;
+    } else {
+        buf[len] = '\0';
+        return 0;
+    }
+}
+
+ScopedFd::ScopedFd(int fd) : fd_(fd) {}
+
+ScopedFd::~ScopedFd() {
+    close(fd_);
+}
+
+ScopedDir::ScopedDir(DIR* dir) : dir_(dir) {}
+
+ScopedDir::~ScopedDir() {
+    if (dir_ != nullptr) {
+        closedir(dir_);
+    }
+}
+
+bool IsRunningInEmulator() {
+    return property_get_bool("ro.kernel.qemu", 0);
 }
 
 }  // namespace vold

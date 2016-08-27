@@ -14,7 +14,9 @@
  * limitations under the License.
  */
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,213 +26,184 @@
 #include <fcntl.h>
 #include <linux/fs.h>
 #include <linux/fiemap.h>
+#include <mntent.h>
 
-#define LOG_TAG "secdiscard"
-#include "cutils/log.h"
+#include <android-base/logging.h>
 
-// Deliberately limit ourselves to wiping small files.
-#define MAX_WIPE_LENGTH 4096
-#define INIT_BUFFER_SIZE 2048
+#include <AutoCloseFD.h>
 
-static void usage(char *progname);
-static void destroy_key(const std::string &path);
-static int file_device_range(const std::string &path, uint64_t range[2]);
-static int open_block_device_for_path(const std::string &path);
-static int read_file_as_string_atomically(const std::string &path, std::string &contents);
-static int find_block_device_for_path(
-    const std::string &mounts,
-    const std::string &path,
-    std::string &block_device);
+namespace {
 
-int main(int argc, char **argv) {
-    if (argc != 2 || argv[1][0] != '/') {
+struct Options {
+    std::vector<std::string> targets;
+    bool unlink{true};
+};
+
+constexpr uint32_t max_extents = 32;
+
+bool read_command_line(int argc, const char * const argv[], Options &options);
+void usage(const char *progname);
+int secdiscard_path(const std::string &path);
+std::unique_ptr<struct fiemap> path_fiemap(const std::string &path, uint32_t extent_count);
+bool check_fiemap(const struct fiemap &fiemap, const std::string &path);
+std::unique_ptr<struct fiemap> alloc_fiemap(uint32_t extent_count);
+std::string block_device_for_path(const std::string &path);
+
+}
+
+int main(int argc, const char * const argv[]) {
+    android::base::InitLogging(const_cast<char **>(argv));
+    Options options;
+    if (!read_command_line(argc, argv, options)) {
         usage(argv[0]);
         return -1;
     }
-    SLOGD("Running: %s %s", argv[0], argv[1]);
-    std::string target(argv[1]);
-    destroy_key(target);
-    if (unlink(argv[1]) != 0 && errno != ENOENT) {
-        SLOGE("Unable to delete %s: %s",
-            argv[1], strerror(errno));
-        return -1;
+    for (auto target: options.targets) {
+        LOG(DEBUG) << "Securely discarding '" << target << "' unlink=" << options.unlink;
+        secdiscard_path(target);
+        if (options.unlink) {
+            if (unlink(target.c_str()) != 0 && errno != ENOENT) {
+                PLOG(ERROR) << "Unable to unlink: " << target;
+            }
+        }
+        LOG(DEBUG) << "Discarded: " << target;
     }
     return 0;
 }
 
-static void usage(char *progname) {
-    fprintf(stderr, "Usage: %s <absolute path>\n", progname);
+namespace {
+
+bool read_command_line(int argc, const char * const argv[], Options &options) {
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp("--no-unlink", argv[i])) {
+            options.unlink = false;
+        } else if (!strcmp("--", argv[i])) {
+            for (int j = i+1; j < argc; j++) {
+                if (argv[j][0] != '/') return false; // Must be absolute path
+                options.targets.emplace_back(argv[j]);
+            }
+            return options.targets.size() > 0;
+        } else {
+            return false; // Unknown option
+        }
+    }
+    return false; // "--" not found
+}
+
+void usage(const char *progname) {
+    fprintf(stderr, "Usage: %s [--no-unlink] -- <absolute path> ...\n", progname);
 }
 
 // BLKSECDISCARD all content in "path", if it's small enough.
-static void destroy_key(const std::string &path) {
-    uint64_t range[2];
-    if (file_device_range(path, range) < 0) {
-        return;
+int secdiscard_path(const std::string &path) {
+    auto fiemap = path_fiemap(path, max_extents);
+    if (!fiemap || !check_fiemap(*fiemap, path)) {
+        return -1;
     }
-    int fs_fd = open_block_device_for_path(path);
-    if (fs_fd < 0) {
-        return;
+    auto block_device = block_device_for_path(path);
+    if (block_device.empty()) {
+        return -1;
     }
-    if (ioctl(fs_fd, BLKSECDISCARD, range) != 0) {
-        SLOGE("Unable to BLKSECDISCARD %s: %s", path.c_str(), strerror(errno));
-        close(fs_fd);
-        return;
+    AutoCloseFD fs_fd(block_device, O_RDWR | O_LARGEFILE);
+    if (!fs_fd) {
+        PLOG(ERROR) << "Failed to open device " << block_device;
+        return -1;
     }
-    close(fs_fd);
-    SLOGD("Discarded %s", path.c_str());
-}
-
-// Find a short range that completely covers the file.
-// If there isn't one, return -1, otherwise 0.
-static int file_device_range(const std::string &path, uint64_t range[2])
-{
-    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        if (errno == ENOENT) {
-            SLOGD("Unable to open %s: %s", path.c_str(), strerror(errno));
-        } else {
-            SLOGE("Unable to open %s: %s", path.c_str(), strerror(errno));
+    for (uint32_t i = 0; i < fiemap->fm_mapped_extents; i++) {
+        uint64_t range[2];
+        range[0] = fiemap->fm_extents[i].fe_physical;
+        range[1] = fiemap->fm_extents[i].fe_length;
+        if (ioctl(fs_fd.get(), BLKSECDISCARD, range) == -1) {
+            PLOG(ERROR) << "Unable to BLKSECDISCARD " << path;
+            return -1;
         }
-        return -1;
     }
-    alignas(struct fiemap) char fiemap_buffer[offsetof(struct fiemap, fm_extents[1])];
-    memset(fiemap_buffer, 0, sizeof(fiemap_buffer));
-    struct fiemap *fiemap = (struct fiemap *)fiemap_buffer;
-    fiemap->fm_start = 0;
-    fiemap->fm_length = UINT64_MAX;
-    fiemap->fm_flags = 0;
-    fiemap->fm_extent_count = 1;
-    fiemap->fm_mapped_extents = 0;
-    if (ioctl(fd, FS_IOC_FIEMAP, fiemap) != 0) {
-        SLOGE("Unable to FIEMAP %s: %s", path.c_str(), strerror(errno));
-        close(fd);
-        return -1;
-    }
-    close(fd);
-    if (fiemap->fm_mapped_extents != 1) {
-        SLOGE("Expecting one extent, got %d in %s", fiemap->fm_mapped_extents, path.c_str());
-        return -1;
-    }
-    struct fiemap_extent *extent = &fiemap->fm_extents[0];
-    if (!(extent->fe_flags & FIEMAP_EXTENT_LAST)) {
-        SLOGE("First extent was not the last in %s", path.c_str());
-        return -1;
-    }
-    if (extent->fe_flags &
-            (FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_DELALLOC | FIEMAP_EXTENT_NOT_ALIGNED)) {
-        SLOGE("Extent has unexpected flags %ulx: %s", extent->fe_flags, path.c_str());
-        return -1;
-    }
-    if (extent->fe_length > MAX_WIPE_LENGTH) {
-        SLOGE("Extent too big, %llu bytes in %s", extent->fe_length, path.c_str());
-        return -1;
-    }
-    range[0] = extent->fe_physical;
-    range[1] = extent->fe_length;
     return 0;
 }
 
-// Given a file path, look for the corresponding
-// block device in /proc/mounts and open it.
-static int open_block_device_for_path(const std::string &path)
+// Read the file's FIEMAP
+std::unique_ptr<struct fiemap> path_fiemap(const std::string &path, uint32_t extent_count)
 {
-    std::string mountsfile("/proc/mounts");
-    std::string mounts;
-    if (read_file_as_string_atomically(mountsfile, mounts) < 0) {
-        return -1;
+    AutoCloseFD fd(path);
+    if (!fd) {
+        if (errno == ENOENT) {
+            PLOG(DEBUG) << "Unable to open " << path;
+        } else {
+            PLOG(ERROR) << "Unable to open " << path;
+        }
+        return nullptr;
     }
-    std::string block_device;
-    if (find_block_device_for_path(mounts, path, block_device) < 0) {
-        return -1;
+    auto fiemap = alloc_fiemap(extent_count);
+    if (ioctl(fd.get(), FS_IOC_FIEMAP, fiemap.get()) != 0) {
+        PLOG(ERROR) << "Unable to FIEMAP " << path;
+        return nullptr;
     }
-    SLOGD("For path %s block device is %s", path.c_str(), block_device.c_str());
-    int res = open(block_device.c_str(), O_RDWR | O_LARGEFILE | O_CLOEXEC);
-    if (res < 0) {
-        SLOGE("Failed to open device %s: %s", block_device.c_str(), strerror(errno));
-        return -1;
+    auto mapped = fiemap->fm_mapped_extents;
+    if (mapped < 1 || mapped > extent_count) {
+        LOG(ERROR) << "Extent count not in bounds 1 <= " << mapped << " <= " << extent_count
+            << " in " << path;
+        return nullptr;
     }
+    return fiemap;
+}
+
+// Ensure that the FIEMAP covers the file and is OK to discard
+bool check_fiemap(const struct fiemap &fiemap, const std::string &path) {
+    auto mapped = fiemap.fm_mapped_extents;
+    if (!(fiemap.fm_extents[mapped - 1].fe_flags & FIEMAP_EXTENT_LAST)) {
+        LOG(ERROR) << "Extent " << mapped -1 << " was not the last in " << path;
+        return false;
+    }
+    for (uint32_t i = 0; i < mapped; i++) {
+        auto flags = fiemap.fm_extents[i].fe_flags;
+        if (flags & (FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_DELALLOC | FIEMAP_EXTENT_NOT_ALIGNED)) {
+            LOG(ERROR) << "Extent " << i << " has unexpected flags " << flags << ": " << path;
+            return false;
+        }
+    }
+    return true;
+}
+
+std::unique_ptr<struct fiemap> alloc_fiemap(uint32_t extent_count)
+{
+    size_t allocsize = offsetof(struct fiemap, fm_extents[extent_count]);
+    std::unique_ptr<struct fiemap> res(new (::operator new (allocsize)) struct fiemap);
+    memset(res.get(), 0, allocsize);
+    res->fm_start = 0;
+    res->fm_length = UINT64_MAX;
+    res->fm_flags = 0;
+    res->fm_extent_count = extent_count;
+    res->fm_mapped_extents = 0;
     return res;
 }
 
-// Read a file into a buffer in a single gulp, for atomicity.
-// Null-terminate the buffer.
-// Retry until the buffer is big enough.
-static int read_file_as_string_atomically(const std::string &path, std::string &contents)
+// Given a file path, look for the corresponding block device in /proc/mount
+std::string block_device_for_path(const std::string &path)
 {
-    ssize_t buffer_size = INIT_BUFFER_SIZE;
-    while (true) {
-        int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-        if (fd < 0) {
-            SLOGE("Failed to open %s: %s", path.c_str(), strerror(errno));
-            return -1;
-        }
-        contents.resize(buffer_size);
-        ssize_t read_size = read(fd, &contents[0], buffer_size);
-        if (read_size < 0) {
-            SLOGE("Failed to read from %s: %s", path.c_str(), strerror(errno));
-            close(fd);
-            return -1;
-        }
-        close(fd);
-        if (read_size < buffer_size) {
-            contents.resize(read_size);
-            return 0;
-        }
-        SLOGD("%s too big for buffer of size %zu", path.c_str(), buffer_size);
-        buffer_size <<= 1;
+    std::unique_ptr<FILE, int(*)(FILE*)> mnts(setmntent("/proc/mounts", "re"), endmntent);
+    if (!mnts) {
+        PLOG(ERROR) << "Unable to open /proc/mounts";
+        return "";
     }
+    std::string result;
+    size_t best_length = 0;
+    struct mntent *mnt; // getmntent returns a thread local, so it's safe.
+    while ((mnt = getmntent(mnts.get())) != nullptr) {
+        auto l = strlen(mnt->mnt_dir);
+        if (l > best_length &&
+            path.size() > l &&
+            path[l] == '/' &&
+            path.compare(0, l, mnt->mnt_dir) == 0) {
+                result = mnt->mnt_fsname;
+                best_length = l;
+        }
+    }
+    if (result.empty()) {
+        LOG(ERROR) <<"Didn't find a mountpoint to match path " << path;
+        return "";
+    }
+    LOG(DEBUG) << "For path " << path << " block device is " << result;
+    return result;
 }
 
-// Search a string representing the contents of /proc/mounts
-// for the mount point of a particular file by prefix matching
-// and return the corresponding block device.
-static int find_block_device_for_path(
-    const std::string &mounts,
-    const std::string &path,
-    std::string &block_device)
-{
-    auto line_begin = mounts.begin();
-    size_t best_prefix = 0;
-    std::string::const_iterator line_end;
-    while (line_begin != mounts.end()) {
-        line_end = std::find(line_begin, mounts.end(), '\n');
-        if (line_end == mounts.end()) {
-            break;
-        }
-        auto device_end = std::find(line_begin, line_end, ' ');
-        if (device_end == line_end) {
-            break;
-        }
-        auto mountpoint_begin = device_end + 1;
-        auto mountpoint_end = std::find(mountpoint_begin, line_end, ' ');
-        if (mountpoint_end == line_end) {
-            break;
-        }
-        if (std::find(line_begin, mountpoint_end, '\\') != mountpoint_end) {
-            // We don't correctly handle escape sequences, and we don't expect
-            // to encounter any, so fail if we do.
-            break;
-        }
-        size_t mountpoint_len = mountpoint_end - mountpoint_begin;
-        if (mountpoint_len > best_prefix &&
-                mountpoint_len < path.length() &&
-                path[mountpoint_len] == '/' &&
-                std::equal(mountpoint_begin, mountpoint_end, path.begin())) {
-            block_device = std::string(line_begin, device_end);
-            best_prefix = mountpoint_len;
-        }
-        line_begin = line_end + 1;
-    }
-    // All of the "break"s above are fatal parse errors.
-    if (line_begin != mounts.end()) {
-        auto bad_line = std::string(line_begin, line_end);
-        SLOGE("Unable to parse line in %s: %s", path.c_str(), bad_line.c_str());
-        return -1;
-    }
-    if (best_prefix == 0) {
-        SLOGE("No prefix found for path: %s", path.c_str());
-        return -1;
-    }
-    return 0;
 }

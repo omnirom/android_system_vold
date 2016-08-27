@@ -17,8 +17,8 @@
 #include "F2fs.h"
 #include "Utils.h"
 
-#include <base/logging.h>
-#include <base/stringprintf.h>
+#include <android-base/logging.h>
+#include <android-base/stringprintf.h>
 #include <private/android_filesystem_config.h>
 
 #include <vector>
