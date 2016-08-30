@@ -32,7 +32,7 @@ status_t Check(const std::string& source, const std::string& target,
 status_t Mount(const std::string& source, const std::string& target, bool ro,
         bool remount, bool executable, const std::string& opts = "",
         bool trusted = false, bool portable = false);
-status_t Format(const std::string& source, unsigned int numSectors,
+status_t Format(const std::string& source, unsigned long numSectors,
         const std::string& target);
 status_t Resize(const std::string& source, unsigned long numSectors);
 

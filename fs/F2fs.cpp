@@ -19,6 +19,7 @@
 
 #include <android-base/logging.h>
 #include <android-base/stringprintf.h>
+#include <private/android_filesystem_config.h>
 
 #include <vector>
 #include <string>
