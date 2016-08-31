@@ -3396,7 +3396,7 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, char *passwd,
             unsigned char encrypted_fake_master_key[KEY_LEN_BYTES];
             memset(fake_master_key, 0, sizeof(fake_master_key));
             encrypt_master_key(passwd, crypt_ftr.salt, fake_master_key,
-                               encrypted_fake_master_key, &crypt_ftr);
+                               encrypted_fake_master_key, &crypt_ftr, true);
         }
 
         /* Write the key to the end of the partition */
