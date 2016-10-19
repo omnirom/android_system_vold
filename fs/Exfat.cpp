@@ -83,7 +83,7 @@ status_t Mount(const std::string& source, const std::string& target, bool ro,
     cmd.push_back(c_source);
     cmd.push_back(c_target);
 
-    return ForkExecvp(cmd);
+    return ForkExecvp(cmd, sFsckUntrustedContext);
 }
 
 status_t Format(const std::string& source) {
@@ -91,7 +91,7 @@ status_t Format(const std::string& source) {
     cmd.push_back(kMkfsPath);
     cmd.push_back(source);
 
-    return ForkExecvp(cmd);
+    return ForkExecvp(cmd, sFsckUntrustedContext);
 }
 
 }  // namespace exfat
