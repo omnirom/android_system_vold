@@ -84,7 +84,7 @@ common_shared_libraries := \
 	libkeymaster_messages \
 
 common_static_libraries := \
-	libbootloader_message \
+	libbootloader_message_writer \
 	libfs_mgr \
 	libfec \
 	libfec_rs \
