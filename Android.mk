@@ -93,6 +93,12 @@ ifeq ($(TARGET_KERNEL_HAVE_NTFS),true)
 vold_cflags += -DCONFIG_KERNEL_HAVE_NTFS
 endif
 
+ifeq ($(TARGET_HW_DISK_ENCRYPTION),true)
+  common_c_includes += $(TARGET_CRYPTFS_HW_PATH)
+  common_shared_libraries += libcryptfs_hw
+  vold_cflags += -DCONFIG_HW_DISK_ENCRYPTION
+endif
+
 include $(CLEAR_VARS)
 
 LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk
