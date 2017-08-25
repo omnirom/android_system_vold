@@ -8,8 +8,10 @@ common_src_files := \
 	NetlinkManager.cpp \
 	NetlinkHandler.cpp \
 	Process.cpp \
+	fs/Exfat.cpp \
 	fs/Ext4.cpp \
 	fs/F2fs.cpp \
+	fs/Ntfs.cpp \
 	fs/Vfat.cpp \
 	Loop.cpp \
 	Devmapper.cpp \
@@ -19,6 +21,7 @@ common_src_files := \
 	VoldUtil.c \
 	cryptfs.cpp \
 	Disk.cpp \
+	DiskPartition.cpp \
 	VolumeBase.cpp \
 	PublicVolume.cpp \
 	PrivateVolume.cpp \
@@ -81,6 +84,14 @@ ifeq ($(TARGET_USERIMAGES_USE_EXT4), true)
   else
     required_modules += make_ext4fs
   endif
+endif
+
+ifeq ($(TARGET_KERNEL_HAVE_EXFAT),true)
+vold_cflags += -DCONFIG_KERNEL_HAVE_EXFAT
+endif
+
+ifeq ($(TARGET_KERNEL_HAVE_NTFS),true)
+vold_cflags += -DCONFIG_KERNEL_HAVE_NTFS
 endif
 
 include $(CLEAR_VARS)
