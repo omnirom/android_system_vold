@@ -34,6 +34,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 
 using android::base::StringPrintf;
@@ -226,6 +227,8 @@ status_t PublicVolume::doMount() {
         LOG(VERBOSE) << "Waiting for FUSE to spin up...";
         usleep(50000); // 50ms
     }
+    /* sdcardfs will have exited already. FUSE will still be running */
+    TEMP_FAILURE_RETRY(waitpid(mFusePid, nullptr, WNOHANG));
 
     return OK;
 }

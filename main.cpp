@@ -39,7 +39,7 @@
 #include <dirent.h>
 #include <fs_mgr.h>
 
-static int process_config(VolumeManager *vm, bool* has_adoptable);
+static int process_config(VolumeManager *vm, bool* has_adoptable, bool* has_quota);
 static void coldboot(const char *path);
 static void parse_args(int argc, char** argv);
 
@@ -109,8 +109,9 @@ int main(int argc, char** argv) {
     }
 
     bool has_adoptable;
+    bool has_quota;
 
-    if (process_config(vm, &has_adoptable)) {
+    if (process_config(vm, &has_adoptable, &has_quota)) {
         PLOG(ERROR) << "Error reading configuration... continuing anyways";
     }
 
@@ -135,6 +136,7 @@ int main(int argc, char** argv) {
     // This call should go after listeners are started to avoid
     // a deadlock between vold and init (see b/34278978 for details)
     property_set("vold.has_adoptable", has_adoptable ? "1" : "0");
+    property_set("vold.has_quota", has_quota ? "1" : "0");
 
     // Do coldboot here so it won't block booting,
     // also the cold boot is needed in case we have flash drive
@@ -216,7 +218,7 @@ static void coldboot(const char *path) {
     }
 }
 
-static int process_config(VolumeManager *vm, bool* has_adoptable) {
+static int process_config(VolumeManager *vm, bool* has_adoptable, bool* has_quota) {
     fstab = fs_mgr_read_fstab_default();
     if (!fstab) {
         PLOG(ERROR) << "Failed to open default fstab";
@@ -225,7 +227,12 @@ static int process_config(VolumeManager *vm, bool* has_adoptable) {
 
     /* Loop through entries looking for ones that vold manages */
     *has_adoptable = false;
+    *has_quota = false;
     for (int i = 0; i < fstab->num_entries; i++) {
+        if (fs_mgr_is_quota(&fstab->recs[i])) {
+            *has_quota = true;
+        }
+
         if (fs_mgr_is_voldmanaged(&fstab->recs[i])) {
             std::string sysPattern(fstab->recs[i].blk_device);
             std::string fstype;
