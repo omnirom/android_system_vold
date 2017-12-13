@@ -55,7 +55,7 @@ status_t Mount(const std::string& source, const std::string& target,
         const std::string& opts /* = "" */, bool trusted, bool portable) {
     std::string data(opts);
 
-    if (portable) {
+    if (portable && false) {
         if (!data.empty()) {
             data += ",";
         }
