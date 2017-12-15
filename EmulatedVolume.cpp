@@ -20,6 +20,7 @@
 #include <android-base/stringprintf.h>
 #include <android-base/logging.h>
 #include <cutils/fs.h>
+#include <cutils/properties.h>
 #include <private/android_filesystem_config.h>
 
 #include <fcntl.h>
@@ -78,17 +79,31 @@ status_t EmulatedVolume::doMount() {
 
     dev_t before = GetDevice(mFuseWrite);
 
+    bool enableGid = property_get_bool("ro.sys.sdcardfs.gid_derivation.enable", true);
     if (!(mFusePid = fork())) {
-        if (execl(kFusePath, kFusePath,
-                "-u", "1023", // AID_MEDIA_RW
-                "-g", "1023", // AID_MEDIA_RW
-                "-m",
-                "-w",
-                "-G",
-                mRawPath.c_str(),
-                label.c_str(),
-                NULL)) {
-            PLOG(ERROR) << "Failed to exec";
+	if (!enableGid) {
+            if (execl(kFusePath, kFusePath,
+                    "-u", "1023", // AID_MEDIA_RW
+                    "-g", "1023", // AID_MEDIA_RW
+                    "-m",
+                    "-w",
+                    mRawPath.c_str(),
+                    label.c_str(),
+                    NULL)) {
+                PLOG(ERROR) << "Failed to exec";
+            }
+        } else {
+            if (execl(kFusePath, kFusePath,
+                    "-u", "1023", // AID_MEDIA_RW
+                    "-g", "1023", // AID_MEDIA_RW
+                    "-m",
+                    "-w",
+                    "-G",
+                    mRawPath.c_str(),
+                    label.c_str(),
+                    NULL)) {
+                PLOG(ERROR) << "Failed to exec";
+            }
         }
 
         LOG(ERROR) << "FUSE exiting";
