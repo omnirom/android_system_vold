@@ -75,6 +75,7 @@ static const unsigned int kMajorBlockExperimentalMin = 240;
 static const unsigned int kMajorBlockExperimentalMax = 254;
 
 static const char* kGptBasicData = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7";
+static const char* kGptLinuxFilesystem = "0FC63DAF-8483-4772-8E79-3D69D8477DE4";
 static const char* kGptAndroidMeta = "19A710A2-B3CA-11E4-B026-10604B889DCF";
 static const char* kGptAndroidExpand = "193D1EA4-B3CA-11E4-B075-10604B889DCF";
 
@@ -366,7 +367,8 @@ status_t Disk::readPartitions() {
                 const char* typeGuid = strtok(nullptr, kSgdiskToken);
                 const char* partGuid = strtok(nullptr, kSgdiskToken);
 
-                if (!strcasecmp(typeGuid, kGptBasicData)) {
+                if (!strcasecmp(typeGuid, kGptBasicData)
+                        || !strcasecmp(typeGuid, kGptLinuxFilesystem)) {
                     createPublicVolume(partDevice);
                 } else if (!strcasecmp(typeGuid, kGptAndroidExpand)) {
                     createPrivateVolume(partDevice, partGuid);
