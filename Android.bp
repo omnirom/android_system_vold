@@ -50,7 +50,6 @@ cc_defaults {
         "libhardware_legacy",
         "libhidlbase",
         "libhwbinder",
-        "libkeystore_binder",
         "libkeyutils",
         "liblog",
         "liblogwrap",
@@ -65,9 +64,7 @@ cc_library_static {
     defaults: ["vold_default_flags"],
 
     srcs: [
-        "binder/android/os/IVold.aidl",
-        "binder/android/os/IVoldListener.aidl",
-        "binder/android/os/IVoldTaskListener.aidl",
+        ":vold_aidl",
     ],
     shared_libs: [
         "libbinder",
@@ -78,6 +75,11 @@ cc_library_static {
         include_dirs: ["frameworks/native/aidl/binder"],
         export_aidl_headers: true,
     },
+}
+
+cc_library_headers {
+    name: "libvold_headers",
+    export_include_dirs: ["."],
 }
 
 // Static library factored out to support testing
@@ -111,6 +113,7 @@ cc_library_static {
         "VoldNativeService.cpp",
         "VoldUtil.cpp",
         "VolumeManager.cpp",
+        "authorization_set.cpp",
         "cryptfs.cpp",
         "fs/Ext4.cpp",
         "fs/F2fs.cpp",
@@ -123,6 +126,16 @@ cc_library_static {
         "model/VolumeBase.cpp",
         "secontext.cpp",
     ],
+    product_variables: {
+        arc: {
+            exclude_srcs: [
+                "model/ObbVolume.cpp",
+            ],
+            static_libs: [
+                "libarcobbvolume",
+            ],
+        },
+    },
 }
 
 cc_binary {
@@ -134,6 +147,13 @@ cc_binary {
 
     srcs: ["main.cpp"],
     static_libs: ["libvold"],
+    product_variables: {
+        arc: {
+            static_libs: [
+                "libarcobbvolume",
+            ]
+        },
+    },
     init_rc: ["vold.rc"],
 
     required: [
@@ -184,6 +204,15 @@ cc_binary {
     ],
     static_libs: [
         "libvold_binder",
+    ],
+}
+
+filegroup {
+    name: "vold_aidl",
+    srcs: [
+        "binder/android/os/IVold.aidl",
+        "binder/android/os/IVoldListener.aidl",
+        "binder/android/os/IVoldTaskListener.aidl",
     ],
 }
 

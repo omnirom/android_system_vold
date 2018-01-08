@@ -33,6 +33,8 @@ interface IVold {
     void onUserStarted(int userId);
     void onUserStopped(int userId);
 
+    void onSecureKeyguardStateChanged(boolean isShowing);
+
     void partition(@utf8InCpp String diskId, int partitionType, int ratio);
     void forgetPartition(@utf8InCpp String partGuid, @utf8InCpp String fsUuid);
 
@@ -54,6 +56,8 @@ interface IVold {
     void destroyObb(@utf8InCpp String volId);
 
     void fstrim(int fstrimFlags, IVoldTaskListener listener);
+    void runIdleMaint(IVoldTaskListener listener);
+    void abortIdleMaint(IVoldTaskListener listener);
 
     FileDescriptor mountAppFuse(int uid, int pid, int mountId);
     void unmountAppFuse(int uid, int pid, int mountId);

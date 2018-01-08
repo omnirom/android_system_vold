@@ -285,6 +285,13 @@ binder::Status VoldNativeService::onUserStopped(int32_t userId) {
     return translate(VolumeManager::Instance()->onUserStopped(userId));
 }
 
+binder::Status VoldNativeService::onSecureKeyguardStateChanged(bool isShowing) {
+    ENFORCE_UID(AID_SYSTEM);
+    ACQUIRE_LOCK;
+
+    return translate(VolumeManager::Instance()->onSecureKeyguardStateChanged(isShowing));
+}
+
 binder::Status VoldNativeService::partition(const std::string& diskId, int32_t partitionType,
         int32_t ratio) {
     ENFORCE_UID(AID_SYSTEM);
@@ -477,6 +484,28 @@ binder::Status VoldNativeService::fstrim(int32_t fstrimFlags,
 
     std::thread([=]() {
         android::vold::Trim(listener);
+    }).detach();
+    return ok();
+}
+
+binder::Status VoldNativeService::runIdleMaint(
+        const android::sp<android::os::IVoldTaskListener>& listener) {
+    ENFORCE_UID(AID_SYSTEM);
+    ACQUIRE_LOCK;
+
+    std::thread([=]() {
+        android::vold::RunIdleMaint(listener);
+    }).detach();
+    return ok();
+}
+
+binder::Status VoldNativeService::abortIdleMaint(
+        const android::sp<android::os::IVoldTaskListener>& listener) {
+    ENFORCE_UID(AID_SYSTEM);
+    ACQUIRE_LOCK;
+
+    std::thread([=]() {
+        android::vold::AbortIdleMaint(listener);
     }).detach();
     return ok();
 }

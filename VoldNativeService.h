@@ -43,6 +43,8 @@ public:
     binder::Status onUserStarted(int32_t userId);
     binder::Status onUserStopped(int32_t userId);
 
+    binder::Status onSecureKeyguardStateChanged(bool isShowing);
+
     binder::Status partition(const std::string& diskId, int32_t partitionType, int32_t ratio);
     binder::Status forgetPartition(const std::string& partGuid, const std::string& fsUuid);
 
@@ -65,6 +67,10 @@ public:
     binder::Status destroyObb(const std::string& volId);
 
     binder::Status fstrim(int32_t fstrimFlags,
+            const android::sp<android::os::IVoldTaskListener>& listener);
+    binder::Status runIdleMaint(
+            const android::sp<android::os::IVoldTaskListener>& listener);
+    binder::Status abortIdleMaint(
             const android::sp<android::os::IVoldTaskListener>& listener);
 
     binder::Status mountAppFuse(int32_t uid, int32_t pid, int32_t mountId,

@@ -96,6 +96,8 @@ extern "C" {
 #define RETRY_MOUNT_ATTEMPTS 10
 #define RETRY_MOUNT_DELAY_SECONDS 1
 
+static int put_crypt_ftr_and_key(struct crypt_mnt_ftr* crypt_ftr);
+
 static unsigned char saved_master_key[KEY_LEN_BYTES];
 static char *saved_mount_point;
 static int  master_key_saved = 0;
@@ -120,7 +122,7 @@ static int keymaster_create_key(struct crypt_mnt_ftr *ftr)
             &ftr->keymaster_blob_size);
     if (rc) {
         if (ftr->keymaster_blob_size > KEYMASTER_BLOB_SIZE) {
-            SLOGE("Keymaster key blob to large)");
+            SLOGE("Keymaster key blob too large");
             ftr->keymaster_blob_size = 0;
         }
         SLOGE("Failed to generate keypair");
@@ -169,8 +171,31 @@ static int keymaster_sign_object(struct crypt_mnt_ftr *ftr,
             SLOGE("Unknown KDF type %d", ftr->kdf_type);
             return -1;
     }
-    return keymaster_sign_object_for_cryptfs_scrypt(ftr->keymaster_blob, ftr->keymaster_blob_size,
-            KEYMASTER_CRYPTFS_RATE_LIMIT, to_sign, to_sign_size, signature, signature_size);
+    for (;;) {
+        auto result = keymaster_sign_object_for_cryptfs_scrypt(
+            ftr->keymaster_blob, ftr->keymaster_blob_size, KEYMASTER_CRYPTFS_RATE_LIMIT, to_sign,
+            to_sign_size, signature, signature_size);
+        switch (result) {
+            case KeymasterSignResult::ok:
+                return 0;
+            case KeymasterSignResult::upgrade:
+                break;
+            default:
+                return -1;
+        }
+        SLOGD("Upgrading key");
+        if (keymaster_upgrade_key_for_cryptfs_scrypt(
+                RSA_KEY_SIZE, RSA_EXPONENT, KEYMASTER_CRYPTFS_RATE_LIMIT, ftr->keymaster_blob,
+                ftr->keymaster_blob_size, ftr->keymaster_blob, KEYMASTER_BLOB_SIZE,
+                &ftr->keymaster_blob_size) != 0) {
+            SLOGE("Failed to upgrade key");
+            return -1;
+        }
+        if (put_crypt_ftr_and_key(ftr) != 0) {
+            SLOGE("Failed to write upgraded key to disk");
+        }
+        SLOGD("Key upgraded successfully");
+    }
 }
 
 /* Store password when userdata is successfully decrypted and mounted.
@@ -1925,16 +1950,19 @@ static int cryptfs_enable_wipe(char *crypto_blkdev, off64_t size, int type)
               args[0], args[1], args[2], args[3], args[4], args[5]);
     } else if (type == F2FS_FS) {
         args[0] = "/system/bin/make_f2fs";
-        args[1] = "-t";
+        args[1] = "-f";
         args[2] = "-d1";
-        args[3] = "-f";
-        args[4] = "-O encrypt";
-        args[5] = crypto_blkdev;
+        args[3] = "-O";
+        args[4] = "encrypt";
+        args[5] = "-O";
+        args[6] = "quota";
+        args[7] = crypto_blkdev;
         snprintf(size_str, sizeof(size_str), "%" PRId64, size);
-        args[6] = size_str;
-        num_args = 7;
-        SLOGI("Making empty filesystem with command %s %s %s %s %s %s %s\n",
-              args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
+        args[8] = size_str;
+        num_args = 9;
+        SLOGI("Making empty filesystem with command %s %s %s %s %s %s %s %s %s\n",
+              args[0], args[1], args[2], args[3], args[4], args[5],
+              args[6], args[7], args[8]);
     } else {
         SLOGE("cryptfs_enable_wipe(): unknown filesystem type %d\n", type);
         return -1;
