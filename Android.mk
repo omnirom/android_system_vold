@@ -104,8 +104,8 @@ ifeq ($(TARGET_HW_DISK_ENCRYPTION),true)
   vold_cflags += -DCONFIG_HW_DISK_ENCRYPTION
 endif
 
-ifeq ($(TARGET_KERNEL_HAVE_EXFAT),true)
-vold_cflags += -DCONFIG_KERNEL_HAVE_EXFAT
+ifneq ($(TARGET_EXFAT_DRIVER),)
+  vold_cflags += -DCONFIG_EXFAT_DRIVER=\"$(TARGET_EXFAT_DRIVER)\"
 endif
 
 ifeq ($(TARGET_KERNEL_HAVE_NTFS),true)
