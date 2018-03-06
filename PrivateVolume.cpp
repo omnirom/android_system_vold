@@ -39,6 +39,8 @@
 
 using android::base::StringPrintf;
 
+using namespace std::chrono_literals;
+
 namespace android {
 namespace vold {
 
@@ -184,6 +186,11 @@ status_t PrivateVolume::doFormat(const std::string& fsType) {
             resolvedFsType = "ext4";
         }
         LOG(DEBUG) << "Resolved auto to " << resolvedFsType;
+    }
+
+    if (!WaitForFile(mDmDevPath, 15s)) {
+        PLOG(ERROR) << "Timed out waiting for " << getId();
+        return -EIO;
     }
 
     if (resolvedFsType == "ext4") {
