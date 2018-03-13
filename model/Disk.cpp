@@ -30,6 +30,8 @@
 #include <android-base/parseint.h>
 #include <ext4_utils/ext4_crypt.h>
 
+#include "cryptfs.h"
+
 #include <vector>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -255,6 +257,7 @@ status_t Disk::readMetadata() {
             PLOG(WARNING) << "Failed to read vendor from " << path;
             return -errno;
         }
+        tmp = android::base::Trim(tmp);
         mLabel = tmp;
         break;
     }
@@ -265,6 +268,7 @@ status_t Disk::readMetadata() {
             PLOG(WARNING) << "Failed to read manufacturer from " << path;
             return -errno;
         }
+        tmp = android::base::Trim(tmp);
         int64_t manfid;
         if (!android::base::ParseInt(tmp, &manfid)) {
             PLOG(WARNING) << "Failed to parse manufacturer " << tmp;
@@ -480,7 +484,7 @@ status_t Disk::partitionMixed(int8_t ratio) {
     }
 
     std::string keyRaw;
-    if (ReadRandomBytes(16, keyRaw) != OK) {
+    if (ReadRandomBytes(cryptfs_get_keysize(), keyRaw) != OK) {
         LOG(ERROR) << "Failed to generate key";
         return -EIO;
     }
