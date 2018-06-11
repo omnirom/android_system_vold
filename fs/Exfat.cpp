@@ -63,7 +63,7 @@ status_t Mount(const std::string& source, const std::string& target, bool ro,
     const char* c_target = target.c_str();
 
     sprintf(mountData,
-#ifdef CONFIG_KERNEL_HAVE_EXFAT
+#ifdef CONFIG_EXFAT_DRIVER
             "noatime,nodev,nosuid,uid=%d,gid=%d,fmask=%o,dmask=%o,%s,%s",
 #else
             "noatime,nodev,nosuid,dirsync,uid=%d,gid=%d,fmask=%o,dmask=%o,%s,%s",
