@@ -91,8 +91,12 @@ public:
 
     int onUserAdded(userid_t userId, int userSerialNumber);
     int onUserRemoved(userid_t userId);
-    int onUserStarted(userid_t userId);
+    int onUserStarted(userid_t userId, const std::vector<std::string>& packageNames);
     int onUserStopped(userid_t userId);
+
+    int addAppIds(const std::vector<std::string>& packageNames, const std::vector<int32_t>& appIds);
+    int addSandboxIds(const std::vector<int32_t>& appIds,
+            const std::vector<std::string>& sandboxIds);
 
     int onSecureKeyguardStateChanged(bool isShowing);
 
@@ -132,7 +136,20 @@ private:
     VolumeManager();
     void readInitialState();
 
-    int linkPrimary(userid_t userId);
+    int linkPrimary(userid_t userId, const std::vector<std::string>& packageNames);
+
+    std::string prepareSandboxSource(uid_t uid, const std::string& sandboxId,
+            const std::string& sandboxRootDir);
+    std::string prepareSandboxTarget(const std::string& packageName, uid_t uid,
+            const std::string& volumeLabel, const std::string& mntTargetRootDir, bool isUserDependent);
+    std::string preparePkgDataSource(const std::string& packageName, uid_t uid,
+            const std::string& dataRootDir);
+    std::string preparePkgDataTarget(const std::string& packageName, uid_t uid,
+            const std::string& pkgSandboxDir);
+    int mountSandboxesForPrimaryVol(const std::string& primaryRoot, userid_t userId,
+            const std::vector<std::string>& packageNames, bool isPrimaryEmulated);
+    std::string prepareSubDirs(const std::string& pathPrefix, const std::string& subDirs,
+            mode_t mode, uid_t uid, gid_t gid);
 
     void handleDiskAdded(const std::shared_ptr<android::vold::Disk>& disk);
     void handleDiskChanged(dev_t device);
@@ -155,6 +172,10 @@ private:
     std::shared_ptr<android::vold::Disk> mVirtualDisk;
     std::shared_ptr<android::vold::VolumeBase> mInternalEmulated;
     std::shared_ptr<android::vold::VolumeBase> mPrimary;
+
+    std::unordered_map<std::string, appid_t> mAppIds;
+    std::unordered_map<appid_t, std::string> mSandboxIds;
+    std::unordered_map<userid_t, std::vector<std::string>> mUserPackages;
 
     int mNextObbId;
     bool mSecureKeyguardShowing;

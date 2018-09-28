@@ -39,8 +39,13 @@ public:
 
     binder::Status onUserAdded(int32_t userId, int32_t userSerial);
     binder::Status onUserRemoved(int32_t userId);
-    binder::Status onUserStarted(int32_t userId);
+    binder::Status onUserStarted(int32_t userId, const std::vector<std::string>& packageNames);
     binder::Status onUserStopped(int32_t userId);
+
+    binder::Status addAppIds(const std::vector<std::string>& packageNames,
+            const std::vector<int32_t>& appIds);
+    binder::Status addSandboxIds(const std::vector<int32_t>& appIds,
+            const std::vector<std::string>& sandboxIds);
 
     binder::Status onSecureKeyguardStateChanged(bool isShowing);
 

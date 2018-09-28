@@ -29,8 +29,11 @@ interface IVold {
 
     void onUserAdded(int userId, int userSerial);
     void onUserRemoved(int userId);
-    void onUserStarted(int userId);
+    void onUserStarted(int userId, in @utf8InCpp String[] packageNames);
     void onUserStopped(int userId);
+
+    void addAppIds(in @utf8InCpp String[] packageNames, in int[] appIds);
+    void addSandboxIds(in int[] appIds, in @utf8InCpp String[] sandboxIds);
 
     void onSecureKeyguardStateChanged(boolean isShowing);
 
@@ -113,8 +116,8 @@ interface IVold {
 
     const int PASSWORD_TYPE_PASSWORD = 0;
     const int PASSWORD_TYPE_DEFAULT = 1;
-    const int PASSWORD_TYPE_PIN = 2;
-    const int PASSWORD_TYPE_PATTERN = 3;
+    const int PASSWORD_TYPE_PATTERN = 2;
+    const int PASSWORD_TYPE_PIN = 3;
 
     const int STORAGE_FLAG_DE = 1;
     const int STORAGE_FLAG_CE = 2;
