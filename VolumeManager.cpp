@@ -26,10 +26,11 @@
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <sys/sysmacros.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <array>
 
 #include <linux/kdev_t.h>
 
@@ -56,6 +57,7 @@
 #include "NetlinkManager.h"
 #include "Process.h"
 #include "Utils.h"
+#include "VoldNativeService.h"
 #include "VoldUtil.h"
 #include "VolumeManager.h"
 #include "cryptfs.h"
@@ -65,6 +67,7 @@
 #include "model/ObbVolume.h"
 
 using android::base::GetBoolProperty;
+using android::base::StartsWith;
 using android::base::StringAppendF;
 using android::base::StringPrintf;
 using android::base::unique_fd;
@@ -84,11 +87,10 @@ static const unsigned int kMajorBlockMmc = 179;
 static const unsigned int kMajorBlockExperimentalMin = 240;
 static const unsigned int kMajorBlockExperimentalMax = 254;
 
-VolumeManager *VolumeManager::sInstance = NULL;
+VolumeManager* VolumeManager::sInstance = NULL;
 
-VolumeManager *VolumeManager::Instance() {
-    if (!sInstance)
-        sInstance = new VolumeManager();
+VolumeManager* VolumeManager::Instance() {
+    if (!sInstance) sInstance = new VolumeManager();
     return sInstance;
 }
 
@@ -98,15 +100,13 @@ VolumeManager::VolumeManager() {
     // For security reasons, assume that a secure keyguard is
     // showing until we hear otherwise
     mSecureKeyguardShowing = true;
-    mMntStorageCreated = false;
 }
 
-VolumeManager::~VolumeManager() {
-}
+VolumeManager::~VolumeManager() {}
 
 int VolumeManager::updateVirtualDisk() {
     ATRACE_NAME("VolumeManager::updateVirtualDisk");
-    if (android::base::GetBoolProperty(kPropVirtualDisk, false)) {
+    if (GetBoolProperty(kPropVirtualDisk, false)) {
         if (access(kPathVirtualDisk, F_OK) != 0) {
             Loop::createImageFile(kPathVirtualDisk, kSizeVirtualDisk / 512);
         }
@@ -123,8 +123,9 @@ int VolumeManager::updateVirtualDisk() {
                 return -1;
             }
 
-            auto disk = new android::vold::Disk("virtual", buf.st_rdev, "virtual",
-                    android::vold::Disk::Flags::kAdoptable | android::vold::Disk::Flags::kSd);
+            auto disk = new android::vold::Disk(
+                "virtual", buf.st_rdev, "virtual",
+                android::vold::Disk::Flags::kAdoptable | android::vold::Disk::Flags::kSd);
             mVirtualDisk = std::shared_ptr<android::vold::Disk>(disk);
             handleDiskAdded(mVirtualDisk);
         }
@@ -163,7 +164,7 @@ int VolumeManager::start() {
     // storage; the framework will decide if it should be mounted.
     CHECK(mInternalEmulated == nullptr);
     mInternalEmulated = std::shared_ptr<android::vold::VolumeBase>(
-            new android::vold::EmulatedVolume("/data/media"));
+        new android::vold::EmulatedVolume("/data/media"));
     mInternalEmulated->create();
 
     // Consider creating a virtual disk
@@ -179,17 +180,17 @@ int VolumeManager::stop() {
     return 0;
 }
 
-void VolumeManager::handleBlockEvent(NetlinkEvent *evt) {
+void VolumeManager::handleBlockEvent(NetlinkEvent* evt) {
     std::lock_guard<std::mutex> lock(mLock);
 
     if (mDebug) {
-        LOG(VERBOSE) << "----------------";
-        LOG(VERBOSE) << "handleBlockEvent with action " << (int) evt->getAction();
+        LOG(DEBUG) << "----------------";
+        LOG(DEBUG) << "handleBlockEvent with action " << (int)evt->getAction();
         evt->dump();
     }
 
-    std::string eventPath(evt->findParam("DEVPATH")?evt->findParam("DEVPATH"):"");
-    std::string devType(evt->findParam("DEVTYPE")?evt->findParam("DEVTYPE"):"");
+    std::string eventPath(evt->findParam("DEVPATH") ? evt->findParam("DEVPATH") : "");
+    std::string devType(evt->findParam("DEVTYPE") ? evt->findParam("DEVTYPE") : "");
 
     if (devType != "disk") return;
 
@@ -198,43 +199,42 @@ void VolumeManager::handleBlockEvent(NetlinkEvent *evt) {
     dev_t device = makedev(major, minor);
 
     switch (evt->getAction()) {
-    case NetlinkEvent::Action::kAdd: {
-        for (const auto& source : mDiskSources) {
-            if (source->matches(eventPath)) {
-                // For now, assume that MMC and virtio-blk (the latter is
-                // emulator-specific; see Disk.cpp for details) devices are SD,
-                // and that everything else is USB
-                int flags = source->getFlags();
-                if (major == kMajorBlockMmc
-                    || (android::vold::IsRunningInEmulator()
-                    && major >= (int) kMajorBlockExperimentalMin
-                    && major <= (int) kMajorBlockExperimentalMax)) {
-                    flags |= android::vold::Disk::Flags::kSd;
-                } else {
-                    flags |= android::vold::Disk::Flags::kUsb;
-                }
+        case NetlinkEvent::Action::kAdd: {
+            for (const auto& source : mDiskSources) {
+                if (source->matches(eventPath)) {
+                    // For now, assume that MMC and virtio-blk (the latter is
+                    // emulator-specific; see Disk.cpp for details) devices are SD,
+                    // and that everything else is USB
+                    int flags = source->getFlags();
+                    if (major == kMajorBlockMmc || (android::vold::IsRunningInEmulator() &&
+                                                    major >= (int)kMajorBlockExperimentalMin &&
+                                                    major <= (int)kMajorBlockExperimentalMax)) {
+                        flags |= android::vold::Disk::Flags::kSd;
+                    } else {
+                        flags |= android::vold::Disk::Flags::kUsb;
+                    }
 
-                auto disk = new android::vold::Disk(eventPath, device,
-                        source->getNickname(), flags);
-                handleDiskAdded(std::shared_ptr<android::vold::Disk>(disk));
-                break;
+                    auto disk =
+                        new android::vold::Disk(eventPath, device, source->getNickname(), flags);
+                    handleDiskAdded(std::shared_ptr<android::vold::Disk>(disk));
+                    break;
+                }
             }
+            break;
         }
-        break;
-    }
-    case NetlinkEvent::Action::kChange: {
-        LOG(DEBUG) << "Disk at " << major << ":" << minor << " changed";
-        handleDiskChanged(device);
-        break;
-    }
-    case NetlinkEvent::Action::kRemove: {
-        handleDiskRemoved(device);
-        break;
-    }
-    default: {
-        LOG(WARNING) << "Unexpected block event action " << (int) evt->getAction();
-        break;
-    }
+        case NetlinkEvent::Action::kChange: {
+            LOG(DEBUG) << "Disk at " << major << ":" << minor << " changed";
+            handleDiskChanged(device);
+            break;
+        }
+        case NetlinkEvent::Action::kRemove: {
+            handleDiskRemoved(device);
+            break;
+        }
+        default: {
+            LOG(WARNING) << "Unexpected block event action " << (int)evt->getAction();
+            break;
+        }
     }
 }
 
@@ -243,7 +243,7 @@ void VolumeManager::handleDiskAdded(const std::shared_ptr<android::vold::Disk>& 
     // until the user unlocks the device to actually touch it
     if (mSecureKeyguardShowing) {
         LOG(INFO) << "Found disk at " << disk->getEventPath()
-                << " but delaying scan due to secure keyguard";
+                  << " but delaying scan due to secure keyguard";
         mPendingDisks.push_back(disk);
     } else {
         disk->create();
@@ -318,8 +318,7 @@ std::shared_ptr<android::vold::VolumeBase> VolumeManager::findVolume(const std::
     return nullptr;
 }
 
-void VolumeManager::listVolumes(android::vold::VolumeBase::Type type,
-        std::list<std::string>& list) {
+void VolumeManager::listVolumes(android::vold::VolumeBase::Type type, std::list<std::string>& list) {
     list.clear();
     for (const auto& disk : mDisks) {
         disk->listVolumes(type, list);
@@ -347,189 +346,332 @@ int VolumeManager::forgetPartition(const std::string& partGuid, const std::strin
     return success ? 0 : -1;
 }
 
-static int prepareMntStorageDir() {
-    std::string mntTarget("/mnt/storage");
-    if (fs_prepare_dir(mntTarget.c_str(), 0755, AID_ROOT, AID_ROOT) != 0) {
-        PLOG(ERROR) << "fs_prepare_dir failed on " << mntTarget;
-        return -errno;
+int VolumeManager::linkPrimary(userid_t userId) {
+    std::string source(mPrimary->getPath());
+    if (mPrimary->isEmulated()) {
+        source = StringPrintf("%s/%d", source.c_str(), userId);
+        fs_prepare_dir(source.c_str(), 0755, AID_ROOT, AID_ROOT);
     }
-    if (TEMP_FAILURE_RETRY(mount("/mnt/runtime/write", mntTarget.c_str(),
-            nullptr, MS_BIND | MS_REC, nullptr)) == -1) {
-        PLOG(ERROR) << "Failed to mount /mnt/runtime/write at " << mntTarget;
-        return -errno;
+
+    std::string target(StringPrintf("/mnt/user/%d/primary", userId));
+    if (TEMP_FAILURE_RETRY(unlink(target.c_str()))) {
+        if (errno != ENOENT) {
+            PLOG(WARNING) << "Failed to unlink " << target;
+        }
     }
-    if (TEMP_FAILURE_RETRY(mount(nullptr, mntTarget.c_str(),
-            nullptr, MS_REC | MS_SLAVE, nullptr)) == -1) {
-        PLOG(ERROR) << "Failed to set MS_SLAVE at " << mntTarget;
+    LOG(DEBUG) << "Linking " << source << " to " << target;
+    if (TEMP_FAILURE_RETRY(symlink(source.c_str(), target.c_str()))) {
+        PLOG(WARNING) << "Failed to link";
         return -errno;
     }
     return 0;
 }
 
-int VolumeManager::linkPrimary(userid_t userId, const std::vector<std::string>& packageNames) {
-    if (GetBoolProperty(kIsolatedStorage, false)) {
-        // This should ideally go into start() but it's possible that system properties are not
-        // loaded at that point.
-        if (!mMntStorageCreated) {
-            prepareMntStorageDir();
-            mMntStorageCreated = true;
-        }
-
-        if (mountSandboxesForPrimaryVol(userId, packageNames) != 0) {
-            return -errno;
-        }
-        // Keep /sdcard working for shell process
-        std::string primarySource(mPrimary->getPath());
-        if (mPrimary->getType() == android::vold::VolumeBase::Type::kEmulated) {
-            StringAppendF(&primarySource, "/%d", userId);
-        }
-        std::string target(StringPrintf("/mnt/user/%d/primary", userId));
-        if (TEMP_FAILURE_RETRY(unlink(target.c_str()))) {
-            if (errno != ENOENT) {
-                PLOG(WARNING) << "Failed to unlink " << target;
-            }
-        }
-        if (TEMP_FAILURE_RETRY(symlink(primarySource.c_str(), target.c_str()))) {
-            PLOG(WARNING) << "Failed to link " << primarySource << " at " << target;
-            return -errno;
-        }
-    } else {
-        std::string source(mPrimary->getPath());
-        if (mPrimary->getType() == android::vold::VolumeBase::Type::kEmulated) {
-            source = StringPrintf("%s/%d", source.c_str(), userId);
-            fs_prepare_dir(source.c_str(), 0755, AID_ROOT, AID_ROOT);
-        }
-
-        std::string target(StringPrintf("/mnt/user/%d/primary", userId));
-        if (TEMP_FAILURE_RETRY(unlink(target.c_str()))) {
-            if (errno != ENOENT) {
-                PLOG(WARNING) << "Failed to unlink " << target;
-            }
-        }
-        LOG(DEBUG) << "Linking " << source << " to " << target;
-        if (TEMP_FAILURE_RETRY(symlink(source.c_str(), target.c_str()))) {
-            PLOG(WARNING) << "Failed to link";
-            return -errno;
-        }
+int VolumeManager::mountPkgSpecificDir(const std::string& mntSourceRoot,
+                                       const std::string& mntTargetRoot,
+                                       const std::string& packageName, const char* dirName) {
+    std::string mntSourceDir =
+        StringPrintf("%s/Android/%s/%s", mntSourceRoot.c_str(), dirName, packageName.c_str());
+    std::string mntTargetDir =
+        StringPrintf("%s/Android/%s/%s", mntTargetRoot.c_str(), dirName, packageName.c_str());
+    if (umount2(mntTargetDir.c_str(), MNT_DETACH) == -1 && errno != EINVAL && errno != ENOENT) {
+        PLOG(ERROR) << "Failed to unmount " << mntTargetDir;
+        return -1;
+    }
+    if (TEMP_FAILURE_RETRY(mount(mntSourceDir.c_str(), mntTargetDir.c_str(), nullptr,
+                                 MS_BIND | MS_REC, nullptr)) == -1) {
+        PLOG(ERROR) << "Failed to mount " << mntSourceDir << " to " << mntTargetDir;
+        return -1;
+    }
+    if (TEMP_FAILURE_RETRY(
+            mount(nullptr, mntTargetDir.c_str(), nullptr, MS_REC | MS_SLAVE, nullptr)) == -1) {
+        PLOG(ERROR) << "Failed to set MS_SLAVE at " << mntTargetDir;
+        return -1;
     }
     return 0;
 }
 
-int VolumeManager::mountSandboxesForPrimaryVol(userid_t userId,
-        const std::vector<std::string>& packageNames) {
-    std::string primaryRoot(StringPrintf("/mnt/storage/%s", mPrimary->getLabel().c_str()));
-    bool isPrimaryEmulated =
-            (mPrimary->getType() == android::vold::VolumeBase::Type::kEmulated);
-    if (isPrimaryEmulated) {
-        StringAppendF(&primaryRoot, "/%d", userId);
-        if (fs_prepare_dir(primaryRoot.c_str(), 0755, AID_ROOT, AID_ROOT) != 0) {
-            PLOG(ERROR) << "fs_prepare_dir failed on " << primaryRoot;
-            return -errno;
-        }
+int VolumeManager::mountPkgSpecificDirsForRunningProcs(
+    userid_t userId, const std::vector<std::string>& packageNames,
+    const std::vector<std::string>& visibleVolLabels) {
+    // TODO: New processes could be started while traversing over the existing
+    // processes which would end up not having the necessary bind mounts. This
+    // issue needs to be fixed, may be by doing multiple passes here?
+    std::unique_ptr<DIR, decltype(&closedir)> dirp(opendir("/proc"), closedir);
+    if (!dirp) {
+        PLOG(ERROR) << "Failed to opendir /proc";
+        return -1;
     }
 
-    std::string sandboxRoot = prepareSubDirs(primaryRoot, "Android/sandbox/",
-            0700, AID_ROOT, AID_ROOT);
-    if (sandboxRoot.empty()) {
-        return -errno;
-    }
-    std::string sharedSandboxRoot;
-    StringAppendF(&sharedSandboxRoot, "%s/shared", sandboxRoot.c_str());
-    // Create shared sandbox base dir for apps with sharedUserIds
-    if (fs_prepare_dir(sharedSandboxRoot.c_str(), 0700, AID_ROOT, AID_ROOT) != 0) {
-        PLOG(ERROR) << "fs_prepare_dir failed on " << sharedSandboxRoot;
-        return -errno;
+    std::string rootName;
+    // Figure out root namespace to compare against below
+    if (!android::vold::Readlinkat(dirfd(dirp.get()), "1/ns/mnt", &rootName)) {
+        PLOG(ERROR) << "Failed to read root namespace";
+        return -1;
     }
 
-    std::string dataRoot = prepareSubDirs(primaryRoot, "Android/data/",
-            0700, AID_ROOT, AID_ROOT);
-    if (dataRoot.empty()) {
-        return -errno;
+    struct stat fullWriteSb;
+    if (TEMP_FAILURE_RETRY(stat("/mnt/runtime/write", &fullWriteSb)) == -1) {
+        PLOG(ERROR) << "Failed to stat /mnt/runtime/write";
+        return -1;
     }
 
-    std::string mntTargetRoot = StringPrintf("/mnt/user/%d", userId);
-    if (fs_prepare_dir(mntTargetRoot.c_str(), 0751, AID_ROOT, AID_ROOT) != 0) {
-        PLOG(ERROR) << "fs_prepare_dir failed on " << mntTargetRoot;
-        return -errno;
+    std::unordered_set<appid_t> validAppIds;
+    for (auto& package : packageNames) {
+        validAppIds.insert(mAppIds[package]);
     }
-    mntTargetRoot.append("/package");
-    if (fs_prepare_dir(mntTargetRoot.c_str(), 0700, AID_ROOT, AID_ROOT) != 0) {
-        PLOG(ERROR) << "fs_prepare_dir failed on " << mntTargetRoot;
-        return -errno;
-    }
+    std::vector<std::string>& userPackages = mUserPackages[userId];
 
-    for (auto& packageName : packageNames) {
-        const auto& it = mAppIds.find(packageName);
-        if (it == mAppIds.end()) {
-            PLOG(ERROR) << "appId is not available for " << packageName;
+    struct dirent* de;
+    // Poke through all running PIDs look for apps running in userId
+    while ((de = readdir(dirp.get()))) {
+        pid_t pid;
+        if (de->d_type != DT_DIR) continue;
+        if (!android::base::ParseInt(de->d_name, &pid)) continue;
+
+        const unique_fd pidFd(
+            openat(dirfd(dirp.get()), de->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+        if (pidFd.get() < 0) {
+            PLOG(WARNING) << "Failed to open /proc/" << pid;
             continue;
         }
-        appid_t appId = it->second;
-        std::string sandboxId = mSandboxIds[appId];
-        uid_t uid = multiuser_get_uid(userId, appId);
-
-        // Create /mnt/storage/emulated/0/Android/sandbox/<sandboxId>
-        std::string pkgSandboxSourceDir = prepareSandboxSource(uid, sandboxId, sandboxRoot);
-        if (pkgSandboxSourceDir.empty()) {
-            return -errno;
+        struct stat sb;
+        if (fstat(pidFd.get(), &sb) != 0) {
+            PLOG(WARNING) << "Failed to stat " << de->d_name;
+            continue;
+        }
+        if (multiuser_get_user_id(sb.st_uid) != userId) {
+            continue;
         }
 
-        // Create [1] /mnt/storage/emulated/0/Android/data/<packageName>
-        // Create [2] /mnt/storage/emulated/0/Android/sandbox/<sandboxId>/Android/data/<packageName>
-        // Mount [1] at [2]
-        std::string pkgDataSourceDir = preparePkgDataSource(packageName, uid, dataRoot);
-        if (pkgDataSourceDir.empty()) {
-            return -errno;
+        // Matches so far, but refuse to touch if in root namespace
+        LOG(VERBOSE) << "Found matching PID " << de->d_name;
+        std::string pidName;
+        if (!android::vold::Readlinkat(pidFd.get(), "ns/mnt", &pidName)) {
+            PLOG(WARNING) << "Failed to read namespace for " << de->d_name;
+            continue;
         }
-        std::string pkgDataTargetDir = preparePkgDataTarget(packageName, uid,
-                pkgSandboxSourceDir);
-        if (pkgDataTargetDir.empty()) {
-            return -errno;
-        }
-        if (TEMP_FAILURE_RETRY(mount(pkgDataSourceDir.c_str(), pkgDataTargetDir.c_str(),
-                nullptr, MS_BIND | MS_REC, nullptr)) == -1) {
-            PLOG(ERROR) << "Failed to mount " << pkgDataSourceDir << " at "
-                        << pkgDataTargetDir;
-            return -errno;
+        if (rootName == pidName) {
+            LOG(WARNING) << "Skipping due to root namespace";
+            continue;
         }
 
-        // Already created [1] /mnt/storage/emulated/0/Android/sandbox/<sandboxId>
-        // Create [2] /mnt/user/0/package/<packageName>/emulated/0
-        // Mount [1] at [2]
-        std::string pkgSandboxTargetDir = prepareSandboxTarget(packageName, uid,
-                mPrimary->getLabel(), mntTargetRoot, isPrimaryEmulated);
-        if (pkgSandboxTargetDir.empty()) {
-            return -errno;
+        // Only update the mount points of processes running with one of validAppIds.
+        // This should skip any isolated uids.
+        appid_t appId = multiuser_get_app_id(sb.st_uid);
+        if (validAppIds.find(appId) == validAppIds.end()) {
+            continue;
         }
 
-        if (TEMP_FAILURE_RETRY(mount(pkgSandboxSourceDir.c_str(), pkgSandboxTargetDir.c_str(),
-                nullptr, MS_BIND | MS_REC, nullptr)) == -1) {
-            PLOG(ERROR) << "Failed to mount " << pkgSandboxSourceDir << " at "
-                        << pkgSandboxTargetDir;
-            return -errno;
+        std::vector<std::string> packagesForUid;
+        for (auto& package : userPackages) {
+            if (mAppIds[package] == appId) {
+                packagesForUid.push_back(package);
+            }
+        }
+        if (packagesForUid.empty()) {
+            continue;
+        }
+        const std::string& sandboxId = mSandboxIds[appId];
+
+        // We purposefully leave the namespace open across the fork
+        unique_fd nsFd(openat(pidFd.get(), "ns/mnt", O_RDONLY));  // not O_CLOEXEC
+        if (nsFd.get() < 0) {
+            PLOG(WARNING) << "Failed to open namespace for " << de->d_name;
+            continue;
         }
 
-        // Create [1] /mnt/user/0/package/<packageName>/self/primary
-        // Already created [2] /mnt/user/0/package/<packageName>/emulated/0
-        // Mount [2] at [1]
-        std::string pkgPrimaryTargetDir = prepareSubDirs(
-                StringPrintf("%s/%s", mntTargetRoot.c_str(), packageName.c_str()),
-                "self/primary/", 0755, uid, uid);
-        if (pkgPrimaryTargetDir.empty()) {
-            return -errno;
+        pid_t child;
+        if (!(child = fork())) {
+            if (setns(nsFd.get(), CLONE_NEWNS) != 0) {
+                PLOG(ERROR) << "Failed to setns for " << de->d_name;
+                _exit(1);
+            }
+
+            struct stat storageSb;
+            if (TEMP_FAILURE_RETRY(stat("/storage", &storageSb)) == -1) {
+                PLOG(ERROR) << "Failed to stat /storage";
+                _exit(1);
+            }
+
+            // Some packages have access to full external storage, identify processes belonging
+            // to those packages by comparing inode no.s of /mnt/runtime/write and /storage
+            if (storageSb.st_dev == fullWriteSb.st_dev && storageSb.st_ino == fullWriteSb.st_ino) {
+                _exit(0);
+            } else {
+                // Some packages don't have access to external storage and processes belonging to
+                // those packages don't have anything mounted at /storage. So, identify those
+                // processes by comparing inode no.s of /mnt/user/%d/package/%s
+                // and /storage
+                std::string pkgStorageSource;
+                for (auto& package : packagesForUid) {
+                    std::string sandbox =
+                        StringPrintf("/mnt/user/%d/package/%s", userId, package.c_str());
+                    struct stat s;
+                    if (TEMP_FAILURE_RETRY(stat(sandbox.c_str(), &s)) == -1) {
+                        PLOG(ERROR) << "Failed to stat " << sandbox;
+                        _exit(1);
+                    }
+                    if (storageSb.st_dev == s.st_dev && storageSb.st_ino == s.st_ino) {
+                        pkgStorageSource = sandbox;
+                        break;
+                    }
+                }
+                if (pkgStorageSource.empty()) {
+                    _exit(0);
+                }
+            }
+
+            for (auto& volumeLabel : visibleVolLabels) {
+                std::string mntSource = StringPrintf("/mnt/runtime/write/%s", volumeLabel.c_str());
+                std::string mntTarget = StringPrintf("/storage/%s", volumeLabel.c_str());
+                if (volumeLabel == "emulated") {
+                    StringAppendF(&mntSource, "/%d", userId);
+                    StringAppendF(&mntTarget, "/%d", userId);
+                }
+                for (auto& package : packagesForUid) {
+                    mountPkgSpecificDir(mntSource, mntTarget, package, "data");
+                    mountPkgSpecificDir(mntSource, mntTarget, package, "media");
+                    mountPkgSpecificDir(mntSource, mntTarget, package, "obb");
+                }
+            }
+            _exit(0);
         }
-        if (TEMP_FAILURE_RETRY(mount(pkgSandboxTargetDir.c_str(), pkgPrimaryTargetDir.c_str(),
-                nullptr, MS_BIND | MS_REC, nullptr)) == -1) {
-            PLOG(ERROR) << "Failed to mount " << pkgSandboxTargetDir << " at "
-                        << pkgPrimaryTargetDir;
-            return -errno;
+
+        if (child == -1) {
+            PLOG(ERROR) << "Failed to fork";
+        } else {
+            TEMP_FAILURE_RETRY(waitpid(child, nullptr, 0));
         }
     }
     return 0;
 }
 
-std::string VolumeManager::prepareSubDirs(const std::string& pathPrefix,
-        const std::string& subDirs, mode_t mode, uid_t uid, gid_t gid) {
+int VolumeManager::prepareSandboxes(userid_t userId, const std::vector<std::string>& packageNames,
+                                    const std::vector<std::string>& visibleVolLabels) {
+    if (visibleVolLabels.empty()) {
+        return 0;
+    }
+    for (auto& volumeLabel : visibleVolLabels) {
+        std::string volumeRoot(StringPrintf("/mnt/runtime/write/%s", volumeLabel.c_str()));
+        bool isVolPrimaryEmulated = (volumeLabel == mPrimary->getLabel() && mPrimary->isEmulated());
+        if (isVolPrimaryEmulated) {
+            StringAppendF(&volumeRoot, "/%d", userId);
+            if (fs_prepare_dir(volumeRoot.c_str(), 0755, AID_ROOT, AID_ROOT) != 0) {
+                PLOG(ERROR) << "fs_prepare_dir failed on " << volumeRoot;
+                return -errno;
+            }
+        }
+
+        std::string sandboxRoot =
+            prepareSubDirs(volumeRoot, "Android/sandbox/", 0700, AID_ROOT, AID_ROOT);
+        if (sandboxRoot.empty()) {
+            return -errno;
+        }
+        std::string sharedSandboxRoot;
+        StringAppendF(&sharedSandboxRoot, "%s/shared", sandboxRoot.c_str());
+        // Create shared sandbox base dir for apps with sharedUserIds
+        if (fs_prepare_dir(sharedSandboxRoot.c_str(), 0700, AID_ROOT, AID_ROOT) != 0) {
+            PLOG(ERROR) << "fs_prepare_dir failed on " << sharedSandboxRoot;
+            return -errno;
+        }
+
+        if (!createPkgSpecificDirRoots(volumeRoot)) {
+            return -errno;
+        }
+
+        std::string mntTargetRoot = StringPrintf("/mnt/user/%d", userId);
+        if (fs_prepare_dir(mntTargetRoot.c_str(), 0751, AID_ROOT, AID_ROOT) != 0) {
+            PLOG(ERROR) << "fs_prepare_dir failed on " << mntTargetRoot;
+            return -errno;
+        }
+        mntTargetRoot.append("/package");
+        if (fs_prepare_dir(mntTargetRoot.c_str(), 0700, AID_ROOT, AID_ROOT) != 0) {
+            PLOG(ERROR) << "fs_prepare_dir failed on " << mntTargetRoot;
+            return -errno;
+        }
+
+        for (auto& packageName : packageNames) {
+            const auto& it = mAppIds.find(packageName);
+            if (it == mAppIds.end()) {
+                PLOG(ERROR) << "appId is not available for " << packageName;
+                continue;
+            }
+            appid_t appId = it->second;
+            std::string sandboxId = mSandboxIds[appId];
+            uid_t uid = multiuser_get_uid(userId, appId);
+
+            // [1] Create /mnt/runtime/write/emulated/0/Android/sandbox/<sandboxId>
+            // [2] Create /mnt/user/0/package/<packageName>/emulated/0
+            // Mount [1] at [2]
+            std::string pkgSandboxSourceDir = prepareSandboxSource(uid, sandboxId, sandboxRoot);
+            if (pkgSandboxSourceDir.empty()) {
+                return -errno;
+            }
+            std::string pkgSandboxTargetDir = prepareSandboxTarget(
+                packageName, uid, volumeLabel, mntTargetRoot, isVolPrimaryEmulated);
+            if (pkgSandboxTargetDir.empty()) {
+                return -errno;
+            }
+            if (umount2(pkgSandboxTargetDir.c_str(), MNT_DETACH) == -1 && errno != EINVAL &&
+                errno != ENOENT) {
+                PLOG(ERROR) << "Failed to unmount " << pkgSandboxTargetDir;
+                return -errno;
+            }
+            if (TEMP_FAILURE_RETRY(mount(pkgSandboxSourceDir.c_str(), pkgSandboxTargetDir.c_str(),
+                                         nullptr, MS_BIND | MS_REC, nullptr)) == -1) {
+                PLOG(ERROR) << "Failed to mount " << pkgSandboxSourceDir << " at "
+                            << pkgSandboxTargetDir;
+                return -errno;
+            }
+            if (TEMP_FAILURE_RETRY(mount(nullptr, pkgSandboxTargetDir.c_str(), nullptr,
+                                         MS_SLAVE | MS_REC, nullptr)) == -1) {
+                PLOG(ERROR) << "Failed to mount " << pkgSandboxSourceDir << " at "
+                            << pkgSandboxTargetDir;
+                return -errno;
+            }
+
+            // Create Android/{data,media,obb}/<packageName> segments at
+            // [1] /mnt/runtime/write/emulated/0/ and
+            // [2] /mnt/runtime/write/emulated/0/Android/sandbox/<sandboxId>/emulated/0/
+            if (!createPkgSpecificDirs(packageName, uid, volumeRoot, pkgSandboxSourceDir)) {
+                return -errno;
+            }
+
+            if (volumeLabel == mPrimary->getLabel()) {
+                // Create [1] /mnt/user/0/package/<packageName>/self/
+                // Already created [2] /mnt/user/0/package/<packageName>/emulated/0
+                // Mount [2] at [1]
+                std::string pkgPrimaryTargetDir =
+                    StringPrintf("%s/%s/self", mntTargetRoot.c_str(), packageName.c_str());
+                if (fs_prepare_dir(pkgPrimaryTargetDir.c_str(), 0755, uid, uid) != 0) {
+                    PLOG(ERROR) << "Failed to fs_prepare_dir on " << pkgPrimaryTargetDir;
+                    return -errno;
+                }
+                StringAppendF(&pkgPrimaryTargetDir, "/primary");
+                std::string primarySource(mPrimary->getPath());
+                if (isVolPrimaryEmulated) {
+                    StringAppendF(&primarySource, "/%d", userId);
+                }
+                if (TEMP_FAILURE_RETRY(unlink(pkgPrimaryTargetDir.c_str()))) {
+                    if (errno != ENOENT) {
+                        PLOG(ERROR) << "Failed to unlink " << pkgPrimaryTargetDir;
+                    }
+                }
+                if (TEMP_FAILURE_RETRY(symlink(primarySource.c_str(), pkgPrimaryTargetDir.c_str()))) {
+                    PLOG(ERROR) << "Failed to link " << primarySource << " at "
+                                << pkgPrimaryTargetDir;
+                    return -errno;
+                }
+            }
+        }
+    }
+    mountPkgSpecificDirsForRunningProcs(userId, packageNames, visibleVolLabels);
+    return 0;
+}
+
+std::string VolumeManager::prepareSubDirs(const std::string& pathPrefix, const std::string& subDirs,
+                                          mode_t mode, uid_t uid, gid_t gid) {
     std::string path(pathPrefix);
     std::vector<std::string> subDirList = android::base::Split(subDirs, "/");
     for (size_t i = 0; i < subDirList.size(); ++i) {
@@ -547,9 +689,9 @@ std::string VolumeManager::prepareSubDirs(const std::string& pathPrefix,
 }
 
 std::string VolumeManager::prepareSandboxSource(uid_t uid, const std::string& sandboxId,
-        const std::string& sandboxRootDir) {
+                                                const std::string& sandboxRootDir) {
     std::string sandboxSourceDir(sandboxRootDir);
-    if (android::base::StartsWith(sandboxId, "shared:")) {
+    if (StartsWith(sandboxId, "shared:")) {
         StringAppendF(&sandboxSourceDir, "/shared/%s", sandboxId.substr(7).c_str());
     } else {
         StringAppendF(&sandboxSourceDir, "/%s", sandboxId.c_str());
@@ -562,21 +704,21 @@ std::string VolumeManager::prepareSandboxSource(uid_t uid, const std::string& sa
 }
 
 std::string VolumeManager::prepareSandboxTarget(const std::string& packageName, uid_t uid,
-        const std::string& volumeLabel, const std::string& mntTargetRootDir,
-        bool isUserDependent) {
+                                                const std::string& volumeLabel,
+                                                const std::string& mntTargetRootDir,
+                                                bool isUserDependent) {
     std::string segment;
     if (isUserDependent) {
-        segment = StringPrintf("%s/%s/%d/",
-                packageName.c_str(), volumeLabel.c_str(), multiuser_get_user_id(uid));
+        segment = StringPrintf("%s/%s/%d/", packageName.c_str(), volumeLabel.c_str(),
+                               multiuser_get_user_id(uid));
     } else {
-        segment = StringPrintf("%s/%s/",
-                packageName.c_str(), volumeLabel.c_str());
+        segment = StringPrintf("%s/%s/", packageName.c_str(), volumeLabel.c_str());
     }
     return prepareSubDirs(mntTargetRootDir, segment.c_str(), 0755, uid, uid);
 }
 
 std::string VolumeManager::preparePkgDataSource(const std::string& packageName, uid_t uid,
-        const std::string& dataRootDir) {
+                                                const std::string& dataRootDir) {
     std::string dataSourceDir = StringPrintf("%s/%s", dataRootDir.c_str(), packageName.c_str());
     if (fs_prepare_dir(dataSourceDir.c_str(), 0755, uid, uid) != 0) {
         PLOG(ERROR) << "fs_prepare_dir failed on " << dataSourceDir;
@@ -585,10 +727,39 @@ std::string VolumeManager::preparePkgDataSource(const std::string& packageName, 
     return dataSourceDir;
 }
 
-std::string VolumeManager::preparePkgDataTarget(const std::string& packageName, uid_t uid,
-        const std::string& pkgSandboxDir) {
-    std::string segment = StringPrintf("Android/data/%s/", packageName.c_str());
-    return prepareSubDirs(pkgSandboxDir, segment.c_str(), 0755, uid, uid);
+bool VolumeManager::createPkgSpecificDirRoots(const std::string& volumeRoot) {
+    std::string volumeAndroidRoot = StringPrintf("%s/Android", volumeRoot.c_str());
+    if (fs_prepare_dir(volumeAndroidRoot.c_str(), 0700, AID_ROOT, AID_ROOT) != 0) {
+        PLOG(ERROR) << "fs_prepare_dir failed on " << volumeAndroidRoot;
+        return false;
+    }
+    std::array<std::string, 3> dirs = {"data", "media", "obb"};
+    for (auto& dir : dirs) {
+        std::string path = StringPrintf("%s/%s", volumeAndroidRoot.c_str(), dir.c_str());
+        if (fs_prepare_dir(path.c_str(), 0700, AID_ROOT, AID_ROOT) != 0) {
+            PLOG(ERROR) << "fs_prepare_dir failed on " << path;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool VolumeManager::createPkgSpecificDirs(const std::string& packageName, uid_t uid,
+                                          const std::string& volumeRoot,
+                                          const std::string& sandboxDirRoot) {
+    std::array<std::string, 3> dirs = {"data", "media", "obb"};
+    for (auto& dir : dirs) {
+        std::string sourceDir = StringPrintf("%s/Android/%s", volumeRoot.c_str(), dir.c_str());
+        if (prepareSubDirs(sourceDir, packageName, 0755, uid, uid).empty()) {
+            return false;
+        }
+        std::string sandboxSegment =
+            StringPrintf("Android/%s/%s/", dir.c_str(), packageName.c_str());
+        if (prepareSubDirs(sandboxDirRoot, sandboxSegment, 0755, uid, uid).empty()) {
+            return false;
+        }
+    }
+    return true;
 }
 
 int VolumeManager::onUserAdded(userid_t userId, int userSerialNumber) {
@@ -602,6 +773,7 @@ int VolumeManager::onUserRemoved(userid_t userId) {
 }
 
 int VolumeManager::onUserStarted(userid_t userId, const std::vector<std::string>& packageNames) {
+    LOG(VERBOSE) << "onUserStarted: " << userId;
     // Note that sometimes the system will spin up processes from Zygote
     // before actually starting the user, so we're okay if Zygote
     // already created this directory.
@@ -611,18 +783,43 @@ int VolumeManager::onUserStarted(userid_t userId, const std::vector<std::string>
     mStartedUsers.insert(userId);
     mUserPackages[userId] = packageNames;
     if (mPrimary) {
-        linkPrimary(userId, packageNames);
+        linkPrimary(userId);
+    }
+    if (GetBoolProperty(kIsolatedStorage, false)) {
+        std::vector<std::string> visibleVolLabels;
+        for (auto& volId : mVisibleVolumeIds) {
+            auto vol = findVolume(volId);
+            userid_t mountUserId = vol->getMountUserId();
+            if (mountUserId == userId || vol->isEmulated()) {
+                visibleVolLabels.push_back(vol->getLabel());
+            }
+        }
+        if (prepareSandboxes(userId, packageNames, visibleVolLabels) != 0) {
+            return -errno;
+        }
     }
     return 0;
 }
 
 int VolumeManager::onUserStopped(userid_t userId) {
+    LOG(VERBOSE) << "onUserStopped: " << userId;
     mStartedUsers.erase(userId);
+
+    std::string mntTargetDir = StringPrintf("/mnt/user/%d", userId);
+    if (android::vold::UnmountTree(mntTargetDir) != 0) {
+        PLOG(ERROR) << "unmountTree on " << mntTargetDir << " failed";
+        return -errno;
+    }
+    if (android::vold::DeleteDirContentsAndDir(mntTargetDir) < 0) {
+        PLOG(ERROR) << "DeleteDirContentsAndDir failed on " << mntTargetDir;
+        return -errno;
+    }
+    LOG(VERBOSE) << "Success: DeleteDirContentsAndDir on " << mntTargetDir;
     return 0;
 }
 
 int VolumeManager::addAppIds(const std::vector<std::string>& packageNames,
-        const std::vector<int32_t>& appIds) {
+                             const std::vector<int32_t>& appIds) {
     for (size_t i = 0; i < packageNames.size(); ++i) {
         mAppIds[packageNames[i]] = appIds[i];
     }
@@ -630,7 +827,7 @@ int VolumeManager::addAppIds(const std::vector<std::string>& packageNames,
 }
 
 int VolumeManager::addSandboxIds(const std::vector<int32_t>& appIds,
-        const std::vector<std::string>& sandboxIds) {
+                                 const std::vector<std::string>& sandboxIds) {
     for (size_t i = 0; i < appIds.size(); ++i) {
         mSandboxIds[appIds[i]] = sandboxIds[i];
     }
@@ -638,7 +835,7 @@ int VolumeManager::addSandboxIds(const std::vector<int32_t>& appIds,
 }
 
 int VolumeManager::mountExternalStorageForApp(const std::string& packageName, appid_t appId,
-        const std::string& sandboxId, userid_t userId) {
+                                              const std::string& sandboxId, userid_t userId) {
     if (!GetBoolProperty(kIsolatedStorage, false)) {
         return 0;
     } else if (mStartedUsers.find(userId) == mStartedUsers.end()) {
@@ -646,13 +843,21 @@ int VolumeManager::mountExternalStorageForApp(const std::string& packageName, ap
         // be created when the user starts.
         return 0;
     }
+    LOG(VERBOSE) << "mountExternalStorageForApp: " << packageName << ", appId=" << appId
+                 << ", sandboxId=" << sandboxId << ", userId=" << userId;
     mUserPackages[userId].push_back(packageName);
     mAppIds[packageName] = appId;
     mSandboxIds[appId] = sandboxId;
-    if (mPrimary) {
-        return mountSandboxesForPrimaryVol(userId, {packageName});
+
+    std::vector<std::string> visibleVolLabels;
+    for (auto& volId : mVisibleVolumeIds) {
+        auto vol = findVolume(volId);
+        userid_t mountUserId = vol->getMountUserId();
+        if (mountUserId == userId || vol->isEmulated()) {
+            visibleVolLabels.push_back(vol->getLabel());
+        }
     }
-    return 0;
+    return prepareSandboxes(userId, {packageName}, visibleVolLabels);
 }
 
 int VolumeManager::onSecureKeyguardStateChanged(bool isShowing) {
@@ -669,37 +874,96 @@ int VolumeManager::onSecureKeyguardStateChanged(bool isShowing) {
     return 0;
 }
 
-int VolumeManager::setPrimary(const std::shared_ptr<android::vold::VolumeBase>& vol) {
-    mPrimary = vol;
-    for (userid_t userId : mStartedUsers) {
-        linkPrimary(userId, mUserPackages[userId]);
+int VolumeManager::onVolumeMounted(android::vold::VolumeBase* vol) {
+    if (!GetBoolProperty(kIsolatedStorage, false)) {
+        return 0;
+    }
+
+    if ((vol->getMountFlags() & android::vold::VoldNativeService::MOUNT_FLAG_VISIBLE) == 0) {
+        return 0;
+    }
+
+    mVisibleVolumeIds.insert(vol->getId());
+    userid_t mountUserId = vol->getMountUserId();
+    if ((vol->getMountFlags() & android::vold::VoldNativeService::MOUNT_FLAG_PRIMARY) != 0) {
+        // We don't want to create another shared_ptr here because then we will end up with
+        // two shared_ptrs owning the underlying pointer without sharing it.
+        mPrimary = findVolume(vol->getId());
+        for (userid_t userId : mStartedUsers) {
+            if (linkPrimary(userId) != 0) {
+                return -errno;
+            }
+        }
+    }
+    if (vol->isEmulated()) {
+        for (userid_t userId : mStartedUsers) {
+            if (prepareSandboxes(userId, mUserPackages[userId], {vol->getLabel()}) != 0) {
+                return -errno;
+            }
+        }
+    } else if (mStartedUsers.find(mountUserId) != mStartedUsers.end()) {
+        if (prepareSandboxes(mountUserId, mUserPackages[mountUserId], {vol->getLabel()}) != 0) {
+            return -errno;
+        }
     }
     return 0;
 }
 
-static int unmount_tree(const std::string& prefix) {
-    FILE* fp = setmntent("/proc/mounts", "r");
-    if (fp == NULL) {
-        PLOG(ERROR) << "Failed to open /proc/mounts";
-        return -errno;
+int VolumeManager::onVolumeUnmounted(android::vold::VolumeBase* vol) {
+    if (!GetBoolProperty(kIsolatedStorage, false)) {
+        return 0;
     }
 
-    // Some volumes can be stacked on each other, so force unmount in
-    // reverse order to give us the best chance of success.
-    std::list<std::string> toUnmount;
-    mntent* mentry;
-    while ((mentry = getmntent(fp)) != NULL) {
-        auto test = std::string(mentry->mnt_dir) + "/";
-        if (android::base::StartsWith(test, prefix)) {
-            toUnmount.push_front(test);
+    if (mVisibleVolumeIds.erase(vol->getId()) == 0) {
+        return 0;
+    }
+
+    if ((vol->getMountFlags() & android::vold::VoldNativeService::MOUNT_FLAG_PRIMARY) != 0) {
+        mPrimary = nullptr;
+    }
+
+    LOG(VERBOSE) << "visibleVolumeUnmounted: " << vol;
+    userid_t mountUserId = vol->getMountUserId();
+    if (vol->isEmulated()) {
+        for (userid_t userId : mStartedUsers) {
+            if (destroySandboxesForVol(vol, userId) != 0) {
+                return -errno;
+            }
+        }
+    } else if (mStartedUsers.find(mountUserId) != mStartedUsers.end()) {
+        if (destroySandboxesForVol(vol, mountUserId) != 0) {
+            return -errno;
         }
     }
-    endmntent(fp);
+    return 0;
+}
 
-    for (const auto& path : toUnmount) {
-        if (umount2(path.c_str(), MNT_DETACH)) {
-            PLOG(ERROR) << "Failed to unmount " << path;
+int VolumeManager::destroySandboxesForVol(android::vold::VolumeBase* vol, userid_t userId) {
+    LOG(VERBOSE) << "destroysandboxesForVol: " << vol << " for user=" << userId;
+    const std::vector<std::string>& packageNames = mUserPackages[userId];
+    for (auto& packageName : packageNames) {
+        std::string volSandboxRoot = StringPrintf("/mnt/user/%d/package/%s/%s", userId,
+                                                  packageName.c_str(), vol->getLabel().c_str());
+        if (android::vold::UnmountTree(volSandboxRoot) != 0) {
+            PLOG(ERROR) << "unmountTree on " << volSandboxRoot << " failed";
+            continue;
         }
+        if (android::vold::DeleteDirContentsAndDir(volSandboxRoot) < 0) {
+            PLOG(ERROR) << "DeleteDirContentsAndDir failed on " << volSandboxRoot;
+            continue;
+        }
+        LOG(VERBOSE) << "Success: DeleteDirContentsAndDir on " << volSandboxRoot;
+    }
+    return 0;
+}
+
+int VolumeManager::setPrimary(const std::shared_ptr<android::vold::VolumeBase>& vol) {
+    if (GetBoolProperty(kIsolatedStorage, false)) {
+        return 0;
+    }
+    mPrimary = vol;
+    for (userid_t userId : mStartedUsers) {
+        linkPrimary(userId);
     }
     return 0;
 }
@@ -766,7 +1030,7 @@ int VolumeManager::remountUid(uid_t uid, const std::string& mode) {
         }
 
         // We purposefully leave the namespace open across the fork
-        nsFd = openat(pidFd, "ns/mnt", O_RDONLY); // not O_CLOEXEC
+        nsFd = openat(pidFd, "ns/mnt", O_RDONLY);  // not O_CLOEXEC
         if (nsFd < 0) {
             PLOG(WARNING) << "Failed to open namespace for " << de->d_name;
             goto next;
@@ -778,7 +1042,7 @@ int VolumeManager::remountUid(uid_t uid, const std::string& mode) {
                 _exit(1);
             }
 
-            unmount_tree("/storage/");
+            android::vold::UnmountTree("/storage/");
 
             std::string storageSource;
             if (mode == "default") {
@@ -791,26 +1055,22 @@ int VolumeManager::remountUid(uid_t uid, const std::string& mode) {
                 // Sane default of no storage visible
                 _exit(0);
             }
-            if (TEMP_FAILURE_RETRY(mount(storageSource.c_str(), "/storage",
-                    NULL, MS_BIND | MS_REC, NULL)) == -1) {
-                PLOG(ERROR) << "Failed to mount " << storageSource << " for "
-                        << de->d_name;
+            if (TEMP_FAILURE_RETRY(
+                    mount(storageSource.c_str(), "/storage", NULL, MS_BIND | MS_REC, NULL)) == -1) {
+                PLOG(ERROR) << "Failed to mount " << storageSource << " for " << de->d_name;
                 _exit(1);
             }
-            if (TEMP_FAILURE_RETRY(mount(NULL, "/storage", NULL,
-                    MS_REC | MS_SLAVE, NULL)) == -1) {
-                PLOG(ERROR) << "Failed to set MS_SLAVE to /storage for "
-                        << de->d_name;
+            if (TEMP_FAILURE_RETRY(mount(NULL, "/storage", NULL, MS_REC | MS_SLAVE, NULL)) == -1) {
+                PLOG(ERROR) << "Failed to set MS_SLAVE to /storage for " << de->d_name;
                 _exit(1);
             }
 
             // Mount user-specific symlink helper into place
             userid_t user_id = multiuser_get_user_id(uid);
             std::string userSource(StringPrintf("/mnt/user/%d", user_id));
-            if (TEMP_FAILURE_RETRY(mount(userSource.c_str(), "/storage/self",
-                    NULL, MS_BIND, NULL)) == -1) {
-                PLOG(ERROR) << "Failed to mount " << userSource << " for "
-                        << de->d_name;
+            if (TEMP_FAILURE_RETRY(
+                    mount(userSource.c_str(), "/storage/self", NULL, MS_BIND, NULL)) == -1) {
+                PLOG(ERROR) << "Failed to mount " << userSource << " for " << de->d_name;
                 _exit(1);
             }
 
@@ -824,7 +1084,7 @@ int VolumeManager::remountUid(uid_t uid, const std::string& mode) {
             TEMP_FAILURE_RETRY(waitpid(child, nullptr, 0));
         }
 
-next:
+    next:
         close(nsFd);
         close(pidFd);
     }
@@ -850,20 +1110,17 @@ int VolumeManager::reset() {
     mUserPackages.clear();
     mAppIds.clear();
     mSandboxIds.clear();
+    mVisibleVolumeIds.clear();
 
     // For unmounting dirs under /mnt/user/<user-id>/package/<package-name>
-    unmount_tree("/mnt/user/");
-    // For unmounting dirs under /mnt/storage including the bind mount at /mnt/storage, that's
-    // why no trailing '/'
-    unmount_tree("/mnt/storage");
-    mMntStorageCreated = false;
+    android::vold::UnmountTree("/mnt/user/");
     return 0;
 }
 
 // Can be called twice (sequentially) during shutdown. should be safe for that.
 int VolumeManager::shutdown() {
     if (mInternalEmulated == nullptr) {
-        return 0; // already shutdown
+        return 0;  // already shutdown
     }
     android::vold::sSleepOnUnmount = false;
     mInternalEmulated->destroy();
@@ -903,11 +1160,12 @@ int VolumeManager::unmountAll() {
     mntent* mentry;
     while ((mentry = getmntent(fp)) != NULL) {
         auto test = std::string(mentry->mnt_dir);
-        if ((android::base::StartsWith(test, "/mnt/") &&
-             !android::base::StartsWith(test, "/mnt/vendor") &&
-             !android::base::StartsWith(test, "/mnt/product") &&
-             !android::base::StartsWith(test, "/mnt/storage")) ||
-            android::base::StartsWith(test, "/storage/")) {
+        if ((StartsWith(test, "/mnt/") &&
+#ifdef __ANDROID_DEBUGGABLE__
+             !StartsWith(test, "/mnt/scratch") &&
+#endif
+             !StartsWith(test, "/mnt/vendor") && !StartsWith(test, "/mnt/product")) ||
+            StartsWith(test, "/storage/")) {
             toUnmount.push_front(test);
         }
     }
@@ -923,7 +1181,7 @@ int VolumeManager::unmountAll() {
 
 int VolumeManager::mkdirs(const std::string& path) {
     // Only offer to create directories for paths managed by vold
-    if (android::base::StartsWith(path, "/storage/")) {
+    if (StartsWith(path, "/storage/")) {
         // fs_mkdirs() does symlink checking and relative path enforcement
         return fs_mkdirs(path.c_str(), 0700);
     } else {
@@ -945,7 +1203,7 @@ static android::status_t getMountPath(uid_t uid, const std::string& name, std::s
             return -EINVAL;
         }
     }
-    *path = android::base::StringPrintf("/mnt/appfuse/%d_%s", uid, name.c_str());
+    *path = StringPrintf("/mnt/appfuse/%d_%s", uid, name.c_str());
     return android::OK;
 }
 
@@ -953,21 +1211,19 @@ static android::status_t mountInNamespace(uid_t uid, int device_fd, const std::s
     // Remove existing mount.
     android::vold::ForceUnmount(path);
 
-    const auto opts = android::base::StringPrintf(
-            "fd=%i,"
-            "rootmode=40000,"
-            "default_permissions,"
-            "allow_other,"
-            "user_id=%d,group_id=%d,"
-            "context=\"u:object_r:app_fuse_file:s0\","
-            "fscontext=u:object_r:app_fusefs:s0",
-            device_fd,
-            uid,
-            uid);
+    const auto opts = StringPrintf(
+        "fd=%i,"
+        "rootmode=40000,"
+        "default_permissions,"
+        "allow_other,"
+        "user_id=%d,group_id=%d,"
+        "context=\"u:object_r:app_fuse_file:s0\","
+        "fscontext=u:object_r:app_fusefs:s0",
+        device_fd, uid, uid);
 
-    const int result = TEMP_FAILURE_RETRY(mount(
-            "/dev/fuse", path.c_str(), "fuse",
-            MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME, opts.c_str()));
+    const int result =
+        TEMP_FAILURE_RETRY(mount("/dev/fuse", path.c_str(), "fuse",
+                                 MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME, opts.c_str()));
     if (result != 0) {
         PLOG(ERROR) << "Failed to mount " << path;
         return -errno;
@@ -976,11 +1232,8 @@ static android::status_t mountInNamespace(uid_t uid, int device_fd, const std::s
     return android::OK;
 }
 
-static android::status_t runCommandInNamespace(const std::string& command,
-                                               uid_t uid,
-                                               pid_t pid,
-                                               const std::string& path,
-                                               int device_fd) {
+static android::status_t runCommandInNamespace(const std::string& command, uid_t uid, pid_t pid,
+                                               const std::string& path, int device_fd) {
     if (DEBUG_APPFUSE) {
         LOG(DEBUG) << "Run app fuse command " << command << " for the path " << path
                    << " in namespace " << uid;
@@ -993,9 +1246,8 @@ static android::status_t runCommandInNamespace(const std::string& command,
     }
 
     // Obtains process file descriptor.
-    const std::string pid_str = android::base::StringPrintf("%d", pid);
-    const unique_fd pid_fd(
-            openat(dir.get(), pid_str.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    const std::string pid_str = StringPrintf("%d", pid);
+    const unique_fd pid_fd(openat(dir.get(), pid_str.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
     if (pid_fd.get() == -1) {
         PLOG(ERROR) << "Failed to open /proc/" << pid;
         return -errno;
@@ -1011,7 +1263,7 @@ static android::status_t runCommandInNamespace(const std::string& command,
         }
         if (sb.st_uid != AID_SYSTEM) {
             LOG(ERROR) << "Only system can mount appfuse. UID expected=" << AID_SYSTEM
-                    << ", actual=" << sb.st_uid;
+                       << ", actual=" << sb.st_uid;
             return -EPERM;
         }
     }
@@ -1020,8 +1272,8 @@ static android::status_t runCommandInNamespace(const std::string& command,
     {
         std::string rootName;
         std::string pidName;
-        if (!android::vold::Readlinkat(dir.get(), "1/ns/mnt", &rootName)
-                || !android::vold::Readlinkat(pid_fd.get(), "ns/mnt", &pidName)) {
+        if (!android::vold::Readlinkat(dir.get(), "1/ns/mnt", &rootName) ||
+            !android::vold::Readlinkat(pid_fd.get(), "ns/mnt", &pidName)) {
             PLOG(ERROR) << "Failed to read namespaces";
             return -EPERM;
         }
@@ -1032,7 +1284,7 @@ static android::status_t runCommandInNamespace(const std::string& command,
     }
 
     // We purposefully leave the namespace open across the fork
-    unique_fd ns_fd(openat(pid_fd.get(), "ns/mnt", O_RDONLY)); // not O_CLOEXEC
+    unique_fd ns_fd(openat(pid_fd.get(), "ns/mnt", O_RDONLY));  // not O_CLOEXEC
     if (ns_fd.get() < 0) {
         PLOG(ERROR) << "Failed to open namespace for /proc/" << pid << "/ns/mnt";
         return -errno;
@@ -1050,8 +1302,8 @@ static android::status_t runCommandInNamespace(const std::string& command,
         } else if (command == "unmount") {
             // If it's just after all FD opened on mount point are closed, umount2 can fail with
             // EBUSY. To avoid the case, specify MNT_DETACH.
-            if (umount2(path.c_str(), UMOUNT_NOFOLLOW | MNT_DETACH) != 0 &&
-                    errno != EINVAL && errno != ENOENT) {
+            if (umount2(path.c_str(), UMOUNT_NOFOLLOW | MNT_DETACH) != 0 && errno != EINVAL &&
+                errno != ENOENT) {
                 PLOG(ERROR) << "Failed to unmount directory.";
                 _exit(-errno);
             }
@@ -1078,11 +1330,11 @@ static android::status_t runCommandInNamespace(const std::string& command,
 }
 
 int VolumeManager::createObb(const std::string& sourcePath, const std::string& sourceKey,
-        int32_t ownerGid, std::string* outVolId) {
+                             int32_t ownerGid, std::string* outVolId) {
     int id = mNextObbId++;
 
     auto vol = std::shared_ptr<android::vold::VolumeBase>(
-            new android::vold::ObbVolume(id, sourcePath, sourceKey, ownerGid));
+        new android::vold::ObbVolume(id, sourcePath, sourceKey, ownerGid));
     vol->create();
 
     mObbVolumes.push_back(vol);
@@ -1103,8 +1355,7 @@ int VolumeManager::destroyObb(const std::string& volId) {
     return android::OK;
 }
 
-int VolumeManager::mountAppFuse(uid_t uid, pid_t pid, int mountId,
-        android::base::unique_fd* device_fd) {
+int VolumeManager::mountAppFuse(uid_t uid, pid_t pid, int mountId, unique_fd* device_fd) {
     std::string name = std::to_string(mountId);
 
     // Check mount point name.
@@ -1122,7 +1373,7 @@ int VolumeManager::mountAppFuse(uid_t uid, pid_t pid, int mountId,
     }
 
     // Open device FD.
-    device_fd->reset(open("/dev/fuse", O_RDWR)); // not O_CLOEXEC
+    device_fd->reset(open("/dev/fuse", O_RDWR));  // not O_CLOEXEC
     if (device_fd->get() == -1) {
         PLOG(ERROR) << "Failed to open /dev/fuse";
         return -1;
