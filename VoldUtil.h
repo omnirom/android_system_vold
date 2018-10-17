@@ -20,11 +20,9 @@
 #include <fstab/fstab.h>
 #include <sys/cdefs.h>
 
-extern struct fstab *fstab_default;
+extern struct fstab* fstab_default;
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(*(a)))
-
-void get_blkdev_size(int fd, unsigned long* nr_sec);
 
 #ifdef CONFIG_HW_DISK_ENCRYPT_PERF
 void get_blkdev_start_sector(int fd, unsigned long* st_sec);

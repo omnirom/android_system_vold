@@ -17,8 +17,8 @@
 #ifndef ANDROID_VOLD_VOLUME_BASE_H
 #define ANDROID_VOLD_VOLUME_BASE_H
 
-#include "android/os/IVoldListener.h"
 #include "Utils.h"
+#include "android/os/IVoldListener.h"
 
 #include <cutils/multiuser.h>
 #include <utils/Errors.h>
@@ -26,6 +26,8 @@
 #include <sys/types.h>
 #include <list>
 #include <string>
+
+static constexpr userid_t USER_UNKNOWN = ((userid_t)-1);
 
 namespace android {
 namespace vold {
@@ -45,7 +47,7 @@ namespace vold {
  * volumes and removes any bind mounts before finally unmounting itself.
  */
 class VolumeBase {
-public:
+  public:
     virtual ~VolumeBase();
 
     enum class Type {
@@ -97,13 +99,17 @@ public:
 
     std::shared_ptr<VolumeBase> findVolume(const std::string& id);
 
+    bool isEmulated() { return mType == Type::kEmulated; }
+
     status_t create();
     status_t destroy();
     status_t mount();
     status_t unmount();
     status_t format(const std::string& fsType);
 
-protected:
+    std::ostream& operator<<(std::ostream& stream) const;
+
+  protected:
     explicit VolumeBase(Type type);
 
     virtual status_t doCreate();
@@ -119,7 +125,7 @@ protected:
 
     android::sp<android::os::IVoldListener> getListener();
 
-private:
+  private:
     /* ID that uniquely references volume while alive */
     std::string mId;
     /* ID that uniquely references parent disk while alive */

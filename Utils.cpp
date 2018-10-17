@@ -22,26 +22,30 @@
 #include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/properties.h>
-#include <android-base/strings.h>
 #include <android-base/stringprintf.h>
+#include <android-base/strings.h>
+#include <android-base/unique_fd.h>
 #include <cutils/fs.h>
 #include <logwrap/logwrap.h>
 #include <private/android_filesystem_config.h>
 
-#include <mutex>
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <mntent.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <sys/mount.h>
-#include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/sysmacros.h>
-#include <sys/wait.h>
 #include <sys/statvfs.h>
+#include <sys/sysmacros.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <list>
+#include <mutex>
 
 #ifndef UMOUNT_NOFOLLOW
-#define UMOUNT_NOFOLLOW    0x00000008  /* Don't follow symlink on umount */
+#define UMOUNT_NOFOLLOW 0x00000008 /* Don't follow symlink on umount */
 #endif
 
 using android::base::ReadFileToString;
@@ -81,8 +85,8 @@ status_t CreateDeviceNode(const std::string& path, dev_t dev) {
     mode_t mode = 0660 | S_IFBLK;
     if (mknod(cpath, mode, dev) < 0) {
         if (errno != EEXIST) {
-            PLOG(ERROR) << "Failed to create device node for " << major(dev)
-                    << ":" << minor(dev) << " at " << path;
+            PLOG(ERROR) << "Failed to create device node for " << major(dev) << ":" << minor(dev)
+                        << " at " << path;
             res = -errno;
         }
     }
@@ -209,8 +213,8 @@ bool FindValue(const std::string& raw, const std::string& key, std::string* valu
     return true;
 }
 
-static status_t readMetadata(const std::string& path, std::string* fsType,
-        std::string* fsUuid, std::string* fsLabel, bool untrusted) {
+static status_t readMetadata(const std::string& path, std::string* fsType, std::string* fsUuid,
+                             std::string* fsLabel, bool untrusted) {
     fsType->clear();
     fsUuid->clear();
     fsLabel->clear();
@@ -244,13 +248,13 @@ static status_t readMetadata(const std::string& path, std::string* fsType,
     return OK;
 }
 
-status_t ReadMetadata(const std::string& path, std::string* fsType,
-        std::string* fsUuid, std::string* fsLabel) {
+status_t ReadMetadata(const std::string& path, std::string* fsType, std::string* fsUuid,
+                      std::string* fsLabel) {
     return readMetadata(path, fsType, fsUuid, fsLabel, false);
 }
 
-status_t ReadMetadataUntrusted(const std::string& path, std::string* fsType,
-        std::string* fsUuid, std::string* fsLabel) {
+status_t ReadMetadataUntrusted(const std::string& path, std::string* fsType, std::string* fsUuid,
+                               std::string* fsLabel) {
     return readMetadata(path, fsType, fsUuid, fsLabel, true);
 }
 
@@ -261,13 +265,13 @@ status_t ForkExecvp(const std::vector<std::string>& args) {
 status_t ForkExecvp(const std::vector<std::string>& args, security_context_t context) {
     std::lock_guard<std::mutex> lock(kSecurityLock);
     size_t argc = args.size();
-    char** argv = (char**) calloc(argc, sizeof(char*));
+    char** argv = (char**)calloc(argc, sizeof(char*));
     for (size_t i = 0; i < argc; i++) {
-        argv[i] = (char*) args[i].c_str();
+        argv[i] = (char*)args[i].c_str();
         if (i == 0) {
-            LOG(VERBOSE) << args[i];
+            LOG(DEBUG) << args[i];
         } else {
-            LOG(VERBOSE) << "    " << args[i];
+            LOG(DEBUG) << "    " << args[i];
         }
     }
 
@@ -289,21 +293,20 @@ status_t ForkExecvp(const std::vector<std::string>& args, security_context_t con
     return res;
 }
 
-status_t ForkExecvp(const std::vector<std::string>& args,
-        std::vector<std::string>& output) {
+status_t ForkExecvp(const std::vector<std::string>& args, std::vector<std::string>& output) {
     return ForkExecvp(args, output, nullptr);
 }
 
-status_t ForkExecvp(const std::vector<std::string>& args,
-        std::vector<std::string>& output, security_context_t context) {
+status_t ForkExecvp(const std::vector<std::string>& args, std::vector<std::string>& output,
+                    security_context_t context) {
     std::lock_guard<std::mutex> lock(kSecurityLock);
     std::string cmd;
     for (size_t i = 0; i < args.size(); i++) {
         cmd += args[i] + " ";
         if (i == 0) {
-            LOG(VERBOSE) << args[i];
+            LOG(DEBUG) << args[i];
         } else {
-            LOG(VERBOSE) << "    " << args[i];
+            LOG(DEBUG) << "    " << args[i];
         }
     }
     output.clear();
@@ -314,7 +317,7 @@ status_t ForkExecvp(const std::vector<std::string>& args,
             abort();
         }
     }
-    FILE* fp = popen(cmd.c_str(), "r"); // NOLINT
+    FILE* fp = popen(cmd.c_str(), "r");  // NOLINT
     if (context) {
         if (setexeccon(nullptr)) {
             LOG(ERROR) << "Failed to setexeccon";
@@ -328,7 +331,7 @@ status_t ForkExecvp(const std::vector<std::string>& args,
     }
     char line[1024];
     while (fgets(line, sizeof(line), fp) != nullptr) {
-        LOG(VERBOSE) << line;
+        LOG(DEBUG) << line;
         output.push_back(std::string(line));
     }
     if (pclose(fp) != 0) {
@@ -341,13 +344,13 @@ status_t ForkExecvp(const std::vector<std::string>& args,
 
 pid_t ForkExecvpAsync(const std::vector<std::string>& args) {
     size_t argc = args.size();
-    char** argv = (char**) calloc(argc + 1, sizeof(char*));
+    char** argv = (char**)calloc(argc + 1, sizeof(char*));
     for (size_t i = 0; i < argc; i++) {
-        argv[i] = (char*) args[i].c_str();
+        argv[i] = (char*)args[i].c_str();
         if (i == 0) {
-            LOG(VERBOSE) << args[i];
+            LOG(DEBUG) << args[i];
         } else {
-            LOG(VERBOSE) << "    " << args[i];
+            LOG(DEBUG) << "    " << args[i];
         }
     }
 
@@ -400,10 +403,10 @@ status_t ReadRandomBytes(size_t bytes, char* buf) {
 status_t GenerateRandomUuid(std::string& out) {
     status_t res = ReadRandomBytes(16, out);
     if (res == OK) {
-        out[6] &= 0x0f;  /* clear version        */
-        out[6] |= 0x40;  /* set to version 4     */
-        out[8] &= 0x3f;  /* clear variant        */
-        out[8] |= 0x80;  /* set to IETF variant  */
+        out[6] &= 0x0f; /* clear version        */
+        out[6] |= 0x40; /* set to version 4     */
+        out[8] &= 0x3f; /* clear variant        */
+        out[8] |= 0x80; /* set to IETF variant  */
     }
     return res;
 }
@@ -415,24 +418,26 @@ status_t HexToStr(const std::string& hex, std::string& str) {
     for (size_t i = 0; i < hex.size(); i++) {
         int val = 0;
         switch (hex[i]) {
-        case ' ': case '-': case ':': continue;
-        case 'f': case 'F': val = 15; break;
-        case 'e': case 'E': val = 14; break;
-        case 'd': case 'D': val = 13; break;
-        case 'c': case 'C': val = 12; break;
-        case 'b': case 'B': val = 11; break;
-        case 'a': case 'A': val = 10; break;
-        case '9': val = 9; break;
-        case '8': val = 8; break;
-        case '7': val = 7; break;
-        case '6': val = 6; break;
-        case '5': val = 5; break;
-        case '4': val = 4; break;
-        case '3': val = 3; break;
-        case '2': val = 2; break;
-        case '1': val = 1; break;
-        case '0': val = 0; break;
-        default: return -EINVAL;
+            // clang-format off
+            case ' ': case '-': case ':': continue;
+            case 'f': case 'F': val = 15; break;
+            case 'e': case 'E': val = 14; break;
+            case 'd': case 'D': val = 13; break;
+            case 'c': case 'C': val = 12; break;
+            case 'b': case 'B': val = 11; break;
+            case 'a': case 'A': val = 10; break;
+            case '9': val = 9; break;
+            case '8': val = 8; break;
+            case '7': val = 7; break;
+            case '6': val = 6; break;
+            case '5': val = 5; break;
+            case '4': val = 4; break;
+            case '3': val = 3; break;
+            case '2': val = 2; break;
+            case '1': val = 1; break;
+            case '0': val = 0; break;
+            default: return -EINVAL;
+                // clang-format on
         }
 
         if (even) {
@@ -475,10 +480,46 @@ status_t NormalizeHex(const std::string& in, std::string& out) {
     return StrToHex(tmp, out);
 }
 
+status_t GetBlockDevSize(int fd, uint64_t* size) {
+    if (ioctl(fd, BLKGETSIZE64, size)) {
+        return -errno;
+    }
+
+    return OK;
+}
+
+status_t GetBlockDevSize(const std::string& path, uint64_t* size) {
+    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    status_t res = OK;
+
+    if (fd < 0) {
+        return -errno;
+    }
+
+    res = GetBlockDevSize(fd, size);
+
+    close(fd);
+
+    return res;
+}
+
+status_t GetBlockDev512Sectors(const std::string& path, uint64_t* nr_sec) {
+    uint64_t size;
+    status_t res = GetBlockDevSize(path, &size);
+
+    if (res != OK) {
+        return res;
+    }
+
+    *nr_sec = size / 512;
+
+    return OK;
+}
+
 uint64_t GetFreeBytes(const std::string& path) {
     struct statvfs sb;
     if (statvfs(path.c_str(), &sb) == 0) {
-        return (uint64_t) sb.f_bavail * sb.f_frsize;
+        return (uint64_t)sb.f_bavail * sb.f_frsize;
     } else {
         return -1;
     }
@@ -486,7 +527,7 @@ uint64_t GetFreeBytes(const std::string& path) {
 
 // TODO: borrowed from frameworks/native/libs/diskusage/ which should
 // eventually be migrated into system/
-static int64_t stat_size(struct stat *s) {
+static int64_t stat_size(struct stat* s) {
     int64_t blksize = s->st_blksize;
     // count actual blocks used instead of nominal file size
     int64_t size = s->st_blocks * 512;
@@ -504,8 +545,8 @@ static int64_t stat_size(struct stat *s) {
 int64_t calculate_dir_size(int dfd) {
     int64_t size = 0;
     struct stat s;
-    DIR *d;
-    struct dirent *de;
+    DIR* d;
+    struct dirent* de;
 
     d = fdopendir(dfd);
     if (d == NULL) {
@@ -514,7 +555,7 @@ int64_t calculate_dir_size(int dfd) {
     }
 
     while ((de = readdir(d))) {
-        const char *name = de->d_name;
+        const char* name = de->d_name;
         if (fstatat(dfd, name, &s, AT_SYMLINK_NOFOLLOW) == 0) {
             size += stat_size(&s);
         }
@@ -523,10 +564,8 @@ int64_t calculate_dir_size(int dfd) {
 
             /* always skip "." and ".." */
             if (name[0] == '.') {
-                if (name[1] == 0)
-                    continue;
-                if ((name[1] == '.') && (name[2] == 0))
-                    continue;
+                if (name[1] == 0) continue;
+                if ((name[1] == '.') && (name[2] == 0)) continue;
             }
 
             subfd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -561,8 +600,7 @@ bool IsFilesystemSupported(const std::string& fsType) {
 status_t WipeBlockDevice(const std::string& path) {
     status_t res = -1;
     const char* c_path = path.c_str();
-    unsigned long nr_sec = 0;
-    unsigned long long range[2];
+    uint64_t range[2] = {0, 0};
 
     int fd = TEMP_FAILURE_RETRY(open(c_path, O_RDWR | O_CLOEXEC));
     if (fd == -1) {
@@ -570,13 +608,10 @@ status_t WipeBlockDevice(const std::string& path) {
         goto done;
     }
 
-    if ((ioctl(fd, BLKGETSIZE, &nr_sec)) == -1) {
+    if (GetBlockDevSize(fd, &range[1]) != OK) {
         PLOG(ERROR) << "Failed to determine size of " << path;
         goto done;
     }
-
-    range[0] = 0;
-    range[1] = (unsigned long long) nr_sec * 512;
 
     LOG(INFO) << "About to discard " << range[1] << " on " << path;
     if (ioctl(fd, BLKDISCARD, &range) == 0) {
@@ -592,8 +627,7 @@ done:
 }
 
 static bool isValidFilename(const std::string& name) {
-    if (name.empty() || (name == ".") || (name == "..")
-            || (name.find('/') != std::string::npos)) {
+    if (name.empty() || (name == ".") || (name == "..") || (name.find('/') != std::string::npos)) {
         return false;
     } else {
         return true;
@@ -688,7 +722,7 @@ dev_t GetDevice(const std::string& path) {
 }
 
 status_t RestoreconRecursive(const std::string& path) {
-    LOG(VERBOSE) << "Starting restorecon of " << path;
+    LOG(DEBUG) << "Starting restorecon of " << path;
 
     static constexpr const char* kRestoreconString = "selinux.restorecon_recursive";
 
@@ -697,7 +731,7 @@ status_t RestoreconRecursive(const std::string& path) {
 
     android::base::WaitForProperty(kRestoreconString, path);
 
-    LOG(VERBOSE) << "Finished restorecon of " << path;
+    LOG(DEBUG) << "Finished restorecon of " << path;
     return OK;
 }
 
@@ -713,8 +747,7 @@ bool Readlinkat(int dirfd, const std::string& path, std::string* result) {
     while (true) {
         ssize_t size = readlinkat(dirfd, path.c_str(), &buf[0], buf.size());
         // Unrecoverable error?
-        if (size == -1)
-            return false;
+        if (size == -1) return false;
         // It fit! (If size == buf.size(), it may have been truncated.)
         if (static_cast<size_t>(size) < buf.size()) {
             result->assign(&buf[0], size);
@@ -727,6 +760,102 @@ bool Readlinkat(int dirfd, const std::string& path, std::string* result) {
 
 bool IsRunningInEmulator() {
     return android::base::GetBoolProperty("ro.kernel.qemu", false);
+}
+
+status_t UnmountTree(const std::string& prefix) {
+    FILE* fp = setmntent("/proc/mounts", "r");
+    if (fp == NULL) {
+        PLOG(ERROR) << "Failed to open /proc/mounts";
+        return -errno;
+    }
+
+    // Some volumes can be stacked on each other, so force unmount in
+    // reverse order to give us the best chance of success.
+    std::list<std::string> toUnmount;
+    mntent* mentry;
+    while ((mentry = getmntent(fp)) != NULL) {
+        auto test = std::string(mentry->mnt_dir) + "/";
+        if (android::base::StartsWith(test, prefix)) {
+            toUnmount.push_front(test);
+        }
+    }
+    endmntent(fp);
+
+    for (const auto& path : toUnmount) {
+        if (umount2(path.c_str(), MNT_DETACH)) {
+            PLOG(ERROR) << "Failed to unmount " << path;
+        }
+    }
+    return OK;
+}
+
+static status_t delete_dir_contents(DIR* dir) {
+    // Shamelessly borrowed from android::installd
+    int dfd = dirfd(dir);
+    if (dfd < 0) {
+        return -errno;
+    }
+
+    status_t result;
+    struct dirent* de;
+    while ((de = readdir(dir))) {
+        const char* name = de->d_name;
+        if (de->d_type == DT_DIR) {
+            /* always skip "." and ".." */
+            if (name[0] == '.') {
+                if (name[1] == 0) continue;
+                if ((name[1] == '.') && (name[2] == 0)) continue;
+            }
+
+            android::base::unique_fd subfd(
+                openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+            if (subfd.get() == -1) {
+                PLOG(ERROR) << "Couldn't openat " << name;
+                result = -errno;
+                continue;
+            }
+            std::unique_ptr<DIR, decltype(&closedir)> subdirp(fdopendir(subfd), closedir);
+            if (!subdirp) {
+                PLOG(ERROR) << "Couldn't fdopendir " << name;
+                result = -errno;
+                continue;
+            }
+            result = delete_dir_contents(subdirp.get());
+            if (unlinkat(dfd, name, AT_REMOVEDIR) < 0) {
+                PLOG(ERROR) << "Couldn't unlinkat " << name;
+                result = -errno;
+            }
+        } else {
+            if (unlinkat(dfd, name, 0) < 0) {
+                PLOG(ERROR) << "Couldn't unlinkat " << name;
+                result = -errno;
+            }
+        }
+    }
+    return result;
+}
+
+status_t DeleteDirContentsAndDir(const std::string& pathname) {
+    // Shamelessly borrowed from android::installd
+    std::unique_ptr<DIR, decltype(&closedir)> dirp(opendir(pathname.c_str()), closedir);
+    if (!dirp) {
+        if (errno == ENOENT) {
+            return OK;
+        }
+        PLOG(ERROR) << "Failed to opendir " << pathname;
+        return -errno;
+    }
+    status_t res = delete_dir_contents(dirp.get());
+    if (res < 0) {
+        return res;
+    }
+    dirp.reset(nullptr);
+    if (rmdir(pathname.c_str()) != 0) {
+        PLOG(ERROR) << "rmdir failed on " << pathname;
+        return -errno;
+    }
+    LOG(VERBOSE) << "Success: rmdir on " << pathname;
+    return OK;
 }
 
 }  // namespace vold

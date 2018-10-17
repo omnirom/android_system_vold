@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 
-#include "Utils.h"
 #include "VolumeBase.h"
+#include "Utils.h"
 #include "VolumeManager.h"
 
-#include <android-base/stringprintf.h>
 #include <android-base/logging.h>
+#include <android-base/stringprintf.h>
 
 #include <fcntl.h>
 #include <stdlib.h>
@@ -32,10 +32,13 @@ using android::base::StringPrintf;
 namespace android {
 namespace vold {
 
-VolumeBase::VolumeBase(Type type) :
-        mType(type), mMountFlags(0), mMountUserId(-1), mCreated(false), mState(
-                State::kUnmounted), mSilent(false) {
-}
+VolumeBase::VolumeBase(Type type)
+    : mType(type),
+      mMountFlags(0),
+      mMountUserId(USER_UNKNOWN),
+      mCreated(false),
+      mState(State::kUnmounted),
+      mSilent(false) {}
 
 VolumeBase::~VolumeBase() {
     CHECK(!mCreated);
@@ -45,7 +48,9 @@ void VolumeBase::setState(State state) {
     mState = state;
 
     auto listener = getListener();
-    if (listener) listener->onVolumeStateChanged(getId(), static_cast<int32_t>(mState));
+    if (listener) {
+        listener->onVolumeStateChanged(getId(), static_cast<int32_t>(mState));
+    }
 }
 
 status_t VolumeBase::setDiskId(const std::string& diskId) {
@@ -131,7 +136,9 @@ status_t VolumeBase::setInternalPath(const std::string& internalPath) {
     mInternalPath = internalPath;
 
     auto listener = getListener();
-    if (listener) listener->onVolumeInternalPathChanged(getId(), mInternalPath);
+    if (listener) {
+        listener->onVolumeInternalPathChanged(getId(), mInternalPath);
+    }
 
     return OK;
 }
@@ -178,8 +185,9 @@ status_t VolumeBase::create() {
     status_t res = doCreate();
 
     auto listener = getListener();
-    if (listener) listener->onVolumeCreated(getId(),
-            static_cast<int32_t>(mType), mDiskId, mPartGuid);
+    if (listener) {
+        listener->onVolumeCreated(getId(), static_cast<int32_t>(mType), mDiskId, mPartGuid);
+    }
 
     setState(State::kUnmounted);
     return res;
@@ -199,9 +207,10 @@ status_t VolumeBase::destroy() {
         setState(State::kRemoved);
     }
 
-
     auto listener = getListener();
-    if (listener) listener->onVolumeDestroyed(getId());
+    if (listener) {
+        listener->onVolumeDestroyed(getId());
+    }
 
     status_t res = doDestroy();
     mCreated = false;
@@ -221,10 +230,9 @@ status_t VolumeBase::mount() {
     setState(State::kChecking);
     status_t res = doMount();
     if (res == OK) {
-        setState(State::kMounted);
-    } else {
-        setState(State::kUnmountable);
+        res = VolumeManager::Instance()->onVolumeMounted(this);
     }
+    setState(res == OK ? State::kMounted : State::kUnmountable);
 
     return res;
 }
@@ -238,14 +246,16 @@ status_t VolumeBase::unmount() {
     setState(State::kEjecting);
     for (const auto& vol : mVolumes) {
         if (vol->destroy()) {
-            LOG(WARNING) << getId() << " failed to destroy " << vol->getId()
-                    << " stacked above";
+            LOG(WARNING) << getId() << " failed to destroy " << vol->getId() << " stacked above";
         }
     }
     mVolumes.clear();
 
-    status_t res = doUnmount();
-    setState(State::kUnmounted);
+    status_t res = VolumeManager::Instance()->onVolumeUnmounted(this);
+    if (res == OK) {
+        res = doUnmount();
+        setState(State::kUnmounted);
+    }
     return res;
 }
 
@@ -267,6 +277,11 @@ status_t VolumeBase::format(const std::string& fsType) {
 
 status_t VolumeBase::doFormat(const std::string& fsType) {
     return -ENOTSUP;
+}
+
+std::ostream& VolumeBase::operator<<(std::ostream& stream) const {
+    return stream << " VolumeBase{id=" << mId << ",label=" << mLabel
+                  << ",mountFlags=" << mMountFlags << ",mountUserId=" << mMountUserId << "}";
 }
 
 }  // namespace vold

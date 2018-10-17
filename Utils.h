@@ -20,12 +20,12 @@
 #include "KeyBuffer.h"
 
 #include <android-base/macros.h>
-#include <utils/Errors.h>
 #include <cutils/multiuser.h>
 #include <selinux/selinux.h>
+#include <utils/Errors.h>
 
-#include <vector>
 #include <string>
+#include <vector>
 
 struct DIR;
 
@@ -59,23 +59,28 @@ status_t BindMount(const std::string& source, const std::string& target);
 bool FindValue(const std::string& raw, const std::string& key, std::string* value);
 
 /* Reads filesystem metadata from device at path */
-status_t ReadMetadata(const std::string& path, std::string* fsType,
-        std::string* fsUuid, std::string* fsLabel);
+status_t ReadMetadata(const std::string& path, std::string* fsType, std::string* fsUuid,
+                      std::string* fsLabel);
 
 /* Reads filesystem metadata from untrusted device at path */
-status_t ReadMetadataUntrusted(const std::string& path, std::string* fsType,
-        std::string* fsUuid, std::string* fsLabel);
+status_t ReadMetadataUntrusted(const std::string& path, std::string* fsType, std::string* fsUuid,
+                               std::string* fsLabel);
 
 /* Returns either WEXITSTATUS() status, or a negative errno */
 status_t ForkExecvp(const std::vector<std::string>& args);
 status_t ForkExecvp(const std::vector<std::string>& args, security_context_t context);
 
-status_t ForkExecvp(const std::vector<std::string>& args,
-        std::vector<std::string>& output);
-status_t ForkExecvp(const std::vector<std::string>& args,
-        std::vector<std::string>& output, security_context_t context);
+status_t ForkExecvp(const std::vector<std::string>& args, std::vector<std::string>& output);
+status_t ForkExecvp(const std::vector<std::string>& args, std::vector<std::string>& output,
+                    security_context_t context);
 
 pid_t ForkExecvpAsync(const std::vector<std::string>& args);
+
+/* Gets block device size in bytes */
+status_t GetBlockDevSize(int fd, uint64_t* size);
+status_t GetBlockDevSize(const std::string& path, uint64_t* size);
+/* Gets block device size in 512 byte sectors */
+status_t GetBlockDev512Sectors(const std::string& path, uint64_t* nr_sec);
 
 status_t ReadRandomBytes(size_t bytes, std::string& out);
 status_t ReadRandomBytes(size_t bytes, char* buffer);
@@ -124,6 +129,10 @@ bool Readlinkat(int dirfd, const std::string& path, std::string* result);
 
 /* Checks if Android is running in QEMU */
 bool IsRunningInEmulator();
+
+status_t UnmountTree(const std::string& prefix);
+
+status_t DeleteDirContentsAndDir(const std::string& pathname);
 
 }  // namespace vold
 }  // namespace android

@@ -14,15 +14,14 @@
  * limitations under the License.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
-#include <signal.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <stdlib.h>
 #include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 #include <sys/select.h>
 #include <sys/time.h>
@@ -32,13 +31,14 @@
 #include "android/os/IVold.h"
 
 #include <android-base/logging.h>
+#include <android-base/parseint.h>
 #include <android-base/stringprintf.h>
 #include <binder/IServiceManager.h>
 #include <binder/Status.h>
 
 #include <private/android_filesystem_config.h>
 
-static void usage(char *progname);
+static void usage(char* progname);
 
 static android::sp<android::IBinder> getServiceAggressive() {
     android::sp<android::IBinder> res;
@@ -50,7 +50,7 @@ static android::sp<android::IBinder> getServiceAggressive() {
             LOG(VERBOSE) << "Waited " << (i * 10) << "ms for vold";
             break;
         }
-        usleep(10000); // 10ms
+        usleep(10000);  // 10ms
     }
     return res;
 }
@@ -105,6 +105,39 @@ int main(int argc, char** argv) {
         checkStatus(vold->mountFstab(args[2]));
     } else if (args[0] == "cryptfs" && args[1] == "encryptFstab" && args.size() == 3) {
         checkStatus(vold->encryptFstab(args[2]));
+    } else if (args[0] == "checkpoint" && args[1] == "startCheckpoint" && args.size() == 3) {
+        int retry;
+        bool success = false;
+        if (!android::base::ParseInt(args[2], &retry)) exit(EINVAL);
+        checkStatus(vold->startCheckpoint(retry, &success));
+        return success ? 1 : 0;
+    } else if (args[0] == "checkpoint" && args[1] == "needsCheckpoint" && args.size() == 2) {
+        bool enabled = false;
+        checkStatus(vold->needsCheckpoint(&enabled));
+        return enabled ? 1 : 0;
+    } else if (args[0] == "checkpoint" && args[1] == "needsRollback" && args.size() == 2) {
+        bool enabled = false;
+        checkStatus(vold->needsRollback(&enabled));
+        return enabled ? 1 : 0;
+    } else if (args[0] == "checkpoint" && args[1] == "commitChanges" && args.size() == 2) {
+        bool success = false;
+        checkStatus(vold->commitChanges(&success));
+        return success ? 1 : 0;
+    } else if (args[0] == "checkpoint" && args[1] == "prepareDriveForCheckpoint" &&
+               args.size() == 3) {
+        bool success = false;
+        checkStatus(vold->prepareDriveForCheckpoint(args[2], &success));
+        return success ? 1 : 0;
+    } else if (args[0] == "checkpoint" && args[1] == "restoreCheckpoint" && args.size() == 3) {
+        bool success = false;
+        checkStatus(vold->restoreCheckpoint(args[2], &success));
+        return success ? 1 : 0;
+    } else if (args[0] == "checkpoint" && args[1] == "markBootAttempt" && args.size() == 2) {
+        bool success = false;
+        checkStatus(vold->markBootAttempt(&success));
+        return success ? 1 : 0;
+    } else if (args[0] == "checkpoint" && args[1] == "abortChanges" && args.size() == 2) {
+        checkStatus(vold->abortChanges());
     } else {
         LOG(ERROR) << "Raw commands are no longer supported";
         exit(EINVAL);
@@ -112,6 +145,6 @@ int main(int argc, char** argv) {
     return 0;
 }
 
-static void usage(char *progname) {
+static void usage(char* progname) {
     LOG(INFO) << "Usage: " << progname << " [--wait] <system> <subcommand> [args...]";
 }
