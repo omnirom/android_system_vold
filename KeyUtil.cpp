@@ -27,8 +27,8 @@
 #include <android-base/logging.h>
 #include <keyutils.h>
 
+#include "FsCrypt.h"
 #include "KeyStorage.h"
-#include "Ext4Crypt.h"
 #include "Utils.h"
 
 #define MAX_USER_ID 0xFFFFFFFF
