@@ -322,6 +322,10 @@ static bool get_volume_file_encryption_options(EncryptionOptions* options) {
     return true;
 }
 
+bool is_metadata_wrapped_key_supported() {
+    return GetEntryForMountPoint(&fstab_default, METADATA_MNT_POINT)->fs_mgr_flags.wrapped_key;
+}
+
 // Prepare a directory without assigning it an encryption policy.  The directory
 // will inherit the encryption policy of its parent directory, or will be
 // unencrypted if the parent directory is unencrypted.
