@@ -29,7 +29,8 @@ interface IVold {
 
     void onUserAdded(int userId, int userSerial);
     void onUserRemoved(int userId);
-    void onUserStarted(int userId, in @utf8InCpp String[] packageNames);
+    void onUserStarted(int userId, in @utf8InCpp String[] packageNames, in int[] appIds,
+            in @utf8InCpp String[] sandboxIds);
     void onUserStopped(int userId);
 
     void addAppIds(in @utf8InCpp String[] packageNames, in int[] appIds);
@@ -102,7 +103,7 @@ interface IVold {
 
     void prepareSandboxForApp(in @utf8InCpp String packageName, int appId,
                               in @utf8InCpp String sandboxId, int userId);
-    void destroySandboxForApp(in @utf8InCpp String packageName, int appId,
+    void destroySandboxForApp(in @utf8InCpp String packageName,
                               in @utf8InCpp String sandboxId, int userId);
 
     void startCheckpoint(int retry);
@@ -113,6 +114,11 @@ interface IVold {
     void prepareCheckpoint();
     void restoreCheckpoint(@utf8InCpp String device);
     void markBootAttempt();
+
+    @utf8InCpp String createStubVolume(@utf8InCpp String sourcePath,
+            @utf8InCpp String mountPath, @utf8InCpp String fsType,
+            @utf8InCpp String fsUuid, @utf8InCpp String fsLabel);
+    void destroyStubVolume(@utf8InCpp String volId);
 
     const int ENCRYPTION_FLAG_NO_UI = 4;
 
@@ -161,4 +167,5 @@ interface IVold {
     const int VOLUME_TYPE_EMULATED = 2;
     const int VOLUME_TYPE_ASEC = 3;
     const int VOLUME_TYPE_OBB = 4;
+    const int VOLUME_TYPE_STUB = 5;
 }

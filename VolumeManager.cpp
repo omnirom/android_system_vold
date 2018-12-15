@@ -49,10 +49,10 @@
 
 #include <private/android_filesystem_config.h>
 
-#include <ext4_utils/ext4_crypt.h>
+#include <fscrypt/fscrypt.h>
 
 #include "Devmapper.h"
-#include "Ext4Crypt.h"
+#include "FsCrypt.h"
 #include "Loop.h"
 #include "NetlinkManager.h"
 #include "Process.h"
@@ -65,6 +65,7 @@
 #include "fs/Vfat.h"
 #include "model/EmulatedVolume.h"
 #include "model/ObbVolume.h"
+#include "model/StubVolume.h"
 
 using android::base::GetBoolProperty;
 using android::base::StartsWith;
@@ -97,6 +98,7 @@ VolumeManager* VolumeManager::Instance() {
 VolumeManager::VolumeManager() {
     mDebug = false;
     mNextObbId = 0;
+    mNextStubVolumeId = 0;
     // For security reasons, assume that a secure keyguard is
     // showing until we hear otherwise
     mSecureKeyguardShowing = true;
@@ -310,6 +312,11 @@ std::shared_ptr<android::vold::VolumeBase> VolumeManager::findVolume(const std::
             return vol;
         }
     }
+    for (const auto& vol : mStubVolumes) {
+        if (vol->getId() == id) {
+            return vol;
+        }
+    }
     for (const auto& vol : mObbVolumes) {
         if (vol->getId() == id) {
             return vol;
@@ -338,8 +345,8 @@ int VolumeManager::forgetPartition(const std::string& partGuid, const std::strin
         LOG(ERROR) << "Failed to unlink " << keyPath;
         success = false;
     }
-    if (e4crypt_is_native()) {
-        if (!e4crypt_destroy_volume_keys(fsUuid)) {
+    if (fscrypt_is_native()) {
+        if (!fscrypt_destroy_volume_keys(fsUuid)) {
             success = false;
         }
     }
@@ -568,13 +575,6 @@ int VolumeManager::prepareSandboxes(userid_t userId, const std::vector<std::stri
         if (sandboxRoot.empty()) {
             return -errno;
         }
-        std::string sharedSandboxRoot;
-        StringAppendF(&sharedSandboxRoot, "%s/shared", sandboxRoot.c_str());
-        // Create shared sandbox base dir for apps with sharedUserIds
-        if (fs_prepare_dir(sharedSandboxRoot.c_str(), 0700, AID_ROOT, AID_ROOT) != 0) {
-            PLOG(ERROR) << "fs_prepare_dir failed on " << sharedSandboxRoot;
-            return -errno;
-        }
 
         if (!createPkgSpecificDirRoots(volumeRoot)) {
             return -errno;
@@ -691,11 +691,7 @@ std::string VolumeManager::prepareSubDirs(const std::string& pathPrefix, const s
 std::string VolumeManager::prepareSandboxSource(uid_t uid, const std::string& sandboxId,
                                                 const std::string& sandboxRootDir) {
     std::string sandboxSourceDir(sandboxRootDir);
-    if (StartsWith(sandboxId, "shared:")) {
-        StringAppendF(&sandboxSourceDir, "/shared/%s", sandboxId.substr(7).c_str());
-    } else {
-        StringAppendF(&sandboxSourceDir, "/%s", sandboxId.c_str());
-    }
+    StringAppendF(&sandboxSourceDir, "/%s", sandboxId.c_str());
     if (fs_prepare_dir(sandboxSourceDir.c_str(), 0755, uid, uid) != 0) {
         PLOG(ERROR) << "fs_prepare_dir failed on " << sandboxSourceDir;
         return kEmptyString;
@@ -772,7 +768,9 @@ int VolumeManager::onUserRemoved(userid_t userId) {
     return 0;
 }
 
-int VolumeManager::onUserStarted(userid_t userId, const std::vector<std::string>& packageNames) {
+int VolumeManager::onUserStarted(userid_t userId, const std::vector<std::string>& packageNames,
+                                 const std::vector<int>& appIds,
+                                 const std::vector<std::string>& sandboxIds) {
     LOG(VERBOSE) << "onUserStarted: " << userId;
     // Note that sometimes the system will spin up processes from Zygote
     // before actually starting the user, so we're okay if Zygote
@@ -782,6 +780,10 @@ int VolumeManager::onUserStarted(userid_t userId, const std::vector<std::string>
 
     mStartedUsers.insert(userId);
     mUserPackages[userId] = packageNames;
+    for (size_t i = 0; i < packageNames.size(); ++i) {
+        mAppIds[packageNames[i]] = appIds[i];
+        mSandboxIds[appIds[i]] = sandboxIds[i];
+    }
     if (mPrimary) {
         linkPrimary(userId);
     }
@@ -863,13 +865,13 @@ int VolumeManager::prepareSandboxForApp(const std::string& packageName, appid_t 
     return prepareSandboxes(userId, {packageName}, visibleVolLabels);
 }
 
-int VolumeManager::destroySandboxForApp(const std::string& packageName, appid_t appId,
+int VolumeManager::destroySandboxForApp(const std::string& packageName,
                                         const std::string& sandboxId, userid_t userId) {
     if (!GetBoolProperty(kIsolatedStorage, false)) {
         return 0;
     }
-    LOG(VERBOSE) << "destroySandboxForApp: " << packageName << ", appId=" << appId
-                 << ", sandboxId=" << sandboxId << ", userId=" << userId;
+    LOG(VERBOSE) << "destroySandboxForApp: " << packageName << ", sandboxId=" << sandboxId
+                 << ", userId=" << userId;
     auto& userPackages = mUserPackages[userId];
     std::remove(userPackages.begin(), userPackages.end(), packageName);
     // If the package is not uninstalled in any other users, remove appId and sandboxId
@@ -883,8 +885,11 @@ int VolumeManager::destroySandboxForApp(const std::string& packageName, appid_t 
         }
     }
     if (!installedInAnyUser) {
-        mAppIds.erase(packageName);
-        mSandboxIds.erase(appId);
+        const auto& entry = mAppIds.find(packageName);
+        if (entry != mAppIds.end()) {
+            mSandboxIds.erase(entry->second);
+            mAppIds.erase(entry);
+        }
     }
 
     std::vector<std::string> visibleVolLabels;
@@ -915,11 +920,7 @@ int VolumeManager::destroySandboxForAppOnVol(const std::string& packageName,
     if (volLabel == mPrimary->getLabel() && mPrimary->isEmulated()) {
         StringAppendF(&sandboxDir, "/%d", userId);
     }
-    if (StartsWith(sandboxId, "shared:")) {
-        StringAppendF(&sandboxDir, "/Android/sandbox/shared/%s", sandboxId.substr(7).c_str());
-    } else {
-        StringAppendF(&sandboxDir, "/Android/sandbox/%s", sandboxId.c_str());
-    }
+    StringAppendF(&sandboxDir, "/Android/sandbox/%s", sandboxId.c_str());
 
     if (android::vold::DeleteDirContentsAndDir(sandboxDir) < 0) {
         PLOG(ERROR) << "DeleteDirContentsAndDir failed on " << sandboxDir;
@@ -1196,6 +1197,7 @@ int VolumeManager::shutdown() {
     for (const auto& disk : mDisks) {
         disk->destroy();
     }
+    mStubVolumes.clear();
     mDisks.clear();
     mPendingDisks.clear();
     android::vold::sSleepOnUnmount = true;
@@ -1209,6 +1211,9 @@ int VolumeManager::unmountAll() {
     // First, try gracefully unmounting all known devices
     if (mInternalEmulated != nullptr) {
         mInternalEmulated->unmount();
+    }
+    for (const auto& stub : mStubVolumes) {
+        stub->unmount();
     }
     for (const auto& disk : mDisks) {
         disk->unmountAll();
@@ -1416,6 +1421,32 @@ int VolumeManager::destroyObb(const std::string& volId) {
         if ((*i)->getId() == volId) {
             (*i)->destroy();
             i = mObbVolumes.erase(i);
+        } else {
+            ++i;
+        }
+    }
+    return android::OK;
+}
+
+int VolumeManager::createStubVolume(const std::string& sourcePath, const std::string& mountPath,
+                                    const std::string& fsType, const std::string& fsUuid,
+                                    const std::string& fsLabel, std::string* outVolId) {
+    int id = mNextStubVolumeId++;
+    auto vol = std::shared_ptr<android::vold::VolumeBase>(
+        new android::vold::StubVolume(id, sourcePath, mountPath, fsType, fsUuid, fsLabel));
+    vol->create();
+
+    mStubVolumes.push_back(vol);
+    *outVolId = vol->getId();
+    return android::OK;
+}
+
+int VolumeManager::destroyStubVolume(const std::string& volId) {
+    auto i = mStubVolumes.begin();
+    while (i != mStubVolumes.end()) {
+        if ((*i)->getId() == volId) {
+            (*i)->destroy();
+            i = mStubVolumes.erase(i);
         } else {
             ++i;
         }
