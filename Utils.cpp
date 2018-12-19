@@ -39,6 +39,7 @@
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <sys/statvfs.h>
+#include <android-base/unique_fd.h>
 
 #ifndef UMOUNT_NOFOLLOW
 #define UMOUNT_NOFOLLOW    0x00000008  /* Don't follow symlink on umount */
@@ -729,6 +730,24 @@ bool Readlinkat(int dirfd, const std::string& path, std::string* result) {
 
 bool IsRunningInEmulator() {
     return android::base::GetBoolProperty("ro.kernel.qemu", false);
+}
+
+bool FsyncDirectory(const std::string& dirname) {
+    android::base::unique_fd fd(TEMP_FAILURE_RETRY(open(dirname.c_str(), O_RDONLY | O_CLOEXEC)));
+    if (fd == -1) {
+        PLOG(ERROR) << "Failed to open " << dirname;
+        return false;
+    }
+    if (fsync(fd) == -1) {
+        if (errno == EROFS || errno == EINVAL) {
+            PLOG(WARNING) << "Skip fsync " << dirname
+                          << " on a file system does not support synchronization";
+        } else {
+            PLOG(ERROR) << "Failed to fsync " << dirname;
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace vold
