@@ -1220,7 +1220,6 @@ static std::string extra_params_as_string(const std::vector<std::string>& extra_
     }
     return extra_params;
 }
-#endif
 
 // Only adds parameters if the property is set.
 static void add_sector_size_param(std::vector<std::string>* extra_params_vec) {
@@ -1236,6 +1235,7 @@ static void add_sector_size_param(std::vector<std::string>* extra_params_vec) {
         extra_params_vec->emplace_back("iv_large_sectors");
     }
 }
+#endif
 
 static int create_crypto_blk_dev(struct crypt_mnt_ftr* crypt_ftr, const unsigned char* master_key,
                                  const char* real_blk_name, char* crypto_blk_name, const char* name,
