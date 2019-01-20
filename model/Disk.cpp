@@ -153,7 +153,7 @@ std::shared_ptr<VolumeBase> Disk::findVolume(const std::string& id) {
     return nullptr;
 }
 
-void Disk::listVolumes(VolumeBase::Type type, std::list<std::string>& list) {
+void Disk::listVolumes(VolumeBase::Type type, std::list<std::string>& list) const {
     for (const auto& vol : mVolumes) {
         if (vol->getType() == type) {
             list.push_back(vol->getId());
@@ -341,7 +341,7 @@ status_t Disk::readPartitions() {
     cmd.push_back(mDevPath);
 
     std::vector<std::string> output;
-    status_t res = ForkExecvp(cmd, output);
+    status_t res = ForkExecvp(cmd, &output);
     if (res != OK) {
         LOG(WARNING) << "sgdisk failed to scan " << mDevPath;
 
