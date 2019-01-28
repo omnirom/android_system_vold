@@ -62,8 +62,8 @@ interface IVold {
     void runIdleMaint(IVoldTaskListener listener);
     void abortIdleMaint(IVoldTaskListener listener);
 
-    FileDescriptor mountAppFuse(int uid, int pid, int mountId);
-    void unmountAppFuse(int uid, int pid, int mountId);
+    FileDescriptor mountAppFuse(int uid, int mountId);
+    void unmountAppFuse(int uid, int mountId);
 
     void fdeCheckPassword(@utf8InCpp String password);
     void fdeRestart();
@@ -120,6 +120,8 @@ interface IVold {
             @utf8InCpp String fsUuid, @utf8InCpp String fsLabel);
     void destroyStubVolume(@utf8InCpp String volId);
 
+    FileDescriptor openAppFuseFile(int uid, int mountId, int fileId, int flags);
+
     const int ENCRYPTION_FLAG_NO_UI = 4;
 
     const int ENCRYPTION_STATE_NONE = 1;
@@ -150,7 +152,8 @@ interface IVold {
     const int REMOUNT_MODE_DEFAULT = 1;
     const int REMOUNT_MODE_READ = 2;
     const int REMOUNT_MODE_WRITE = 3;
-    const int REMOUNT_MODE_FULL = 4;
+    const int REMOUNT_MODE_INSTALLER = 4;
+    const int REMOUNT_MODE_FULL = 5;
 
     const int VOLUME_STATE_UNMOUNTED = 0;
     const int VOLUME_STATE_CHECKING = 1;

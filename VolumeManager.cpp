@@ -51,6 +51,7 @@
 
 #include <fscrypt/fscrypt.h>
 
+#include "AppFuseUtil.h"
 #include "Devmapper.h"
 #include "FsCrypt.h"
 #include "Loop.h"
@@ -72,6 +73,7 @@ using android::base::StartsWith;
 using android::base::StringAppendF;
 using android::base::StringPrintf;
 using android::base::unique_fd;
+using android::vold::VoldNativeService;
 
 static const char* kPathUserMount = "/mnt/user";
 static const char* kPathVirtualDisk = "/data/misc/vold/virtual_disk";
@@ -325,7 +327,8 @@ std::shared_ptr<android::vold::VolumeBase> VolumeManager::findVolume(const std::
     return nullptr;
 }
 
-void VolumeManager::listVolumes(android::vold::VolumeBase::Type type, std::list<std::string>& list) {
+void VolumeManager::listVolumes(android::vold::VolumeBase::Type type,
+                                std::list<std::string>& list) const {
     list.clear();
     for (const auto& disk : mDisks) {
         disk->listVolumes(type, list);
@@ -400,7 +403,7 @@ int VolumeManager::mountPkgSpecificDir(const std::string& mntSourceRoot,
 
 int VolumeManager::mountPkgSpecificDirsForRunningProcs(
     userid_t userId, const std::vector<std::string>& packageNames,
-    const std::vector<std::string>& visibleVolLabels) {
+    const std::vector<std::string>& visibleVolLabels, int remountMode) {
     // TODO: New processes could be started while traversing over the existing
     // processes which would end up not having the necessary bind mounts. This
     // issue needs to be fixed, may be by doing multiple passes here?
@@ -495,38 +498,32 @@ int VolumeManager::mountPkgSpecificDirsForRunningProcs(
                 _exit(1);
             }
 
-            struct stat storageSb;
-            if (TEMP_FAILURE_RETRY(stat("/storage", &storageSb)) == -1) {
-                PLOG(ERROR) << "Failed to stat /storage";
-                _exit(1);
-            }
-
-            // Some packages have access to full external storage, identify processes belonging
-            // to those packages by comparing inode no.s of /mnt/runtime/write and /storage
-            if (storageSb.st_dev == fullWriteSb.st_dev && storageSb.st_ino == fullWriteSb.st_ino) {
-                _exit(0);
+            int mountMode;
+            if (remountMode == -1) {
+                mountMode = getMountModeForRunningProc(packagesForUid, userId, fullWriteSb);
+                if (mountMode == -1) {
+                    _exit(1);
+                }
             } else {
-                // Some packages don't have access to external storage and processes belonging to
-                // those packages don't have anything mounted at /storage. So, identify those
-                // processes by comparing inode no.s of /mnt/user/%d/package/%s
-                // and /storage
-                std::string pkgStorageSource;
-                for (auto& package : packagesForUid) {
-                    std::string sandbox =
-                        StringPrintf("/mnt/user/%d/package/%s", userId, package.c_str());
-                    struct stat s;
-                    if (TEMP_FAILURE_RETRY(stat(sandbox.c_str(), &s)) == -1) {
-                        PLOG(ERROR) << "Failed to stat " << sandbox;
-                        _exit(1);
+                mountMode = remountMode;
+                std::string obbMountFile = StringPrintf("/mnt/user/%d/package/%s/obb_mount", userId,
+                                                        packagesForUid[0].c_str());
+                if (mountMode == VoldNativeService::REMOUNT_MODE_INSTALLER) {
+                    if (access(obbMountFile.c_str(), F_OK) != 0) {
+                        const unique_fd fd(
+                            TEMP_FAILURE_RETRY(open(obbMountFile.c_str(), O_RDWR | O_CREAT, 0660)));
                     }
-                    if (storageSb.st_dev == s.st_dev && storageSb.st_ino == s.st_ino) {
-                        pkgStorageSource = sandbox;
-                        break;
+                } else {
+                    if (access(obbMountFile.c_str(), F_OK) == 0) {
+                        remove(obbMountFile.c_str());
                     }
                 }
-                if (pkgStorageSource.empty()) {
-                    _exit(0);
-                }
+            }
+            if (mountMode == VoldNativeService::REMOUNT_MODE_FULL ||
+                mountMode == VoldNativeService::REMOUNT_MODE_NONE) {
+                // These mount modes are not going to change dynamically, so don't bother
+                // unmounting/remounting dirs.
+                _exit(0);
             }
 
             for (auto& volumeLabel : visibleVolLabels) {
@@ -536,10 +533,31 @@ int VolumeManager::mountPkgSpecificDirsForRunningProcs(
                     StringAppendF(&mntSource, "/%d", userId);
                     StringAppendF(&mntTarget, "/%d", userId);
                 }
+                std::string obbSourceDir = StringPrintf("%s/Android/obb", mntSource.c_str());
+                std::string obbTargetDir = StringPrintf("%s/Android/obb", mntTarget.c_str());
+                if (umount2(obbTargetDir.c_str(), MNT_DETACH) == -1 && errno != EINVAL &&
+                    errno != ENOENT) {
+                    PLOG(ERROR) << "Failed to unmount " << obbTargetDir;
+                    continue;
+                }
                 for (auto& package : packagesForUid) {
                     mountPkgSpecificDir(mntSource, mntTarget, package, "data");
                     mountPkgSpecificDir(mntSource, mntTarget, package, "media");
-                    mountPkgSpecificDir(mntSource, mntTarget, package, "obb");
+                    if (mountMode != VoldNativeService::REMOUNT_MODE_INSTALLER) {
+                        mountPkgSpecificDir(mntSource, mntTarget, package, "obb");
+                    }
+                }
+                if (mountMode == VoldNativeService::REMOUNT_MODE_INSTALLER) {
+                    if (TEMP_FAILURE_RETRY(mount(obbSourceDir.c_str(), obbTargetDir.c_str(),
+                                                 nullptr, MS_BIND | MS_REC, nullptr)) == -1) {
+                        PLOG(ERROR) << "Failed to mount " << obbSourceDir << " to " << obbTargetDir;
+                        continue;
+                    }
+                    if (TEMP_FAILURE_RETRY(mount(nullptr, obbTargetDir.c_str(), nullptr,
+                                                 MS_REC | MS_SLAVE, nullptr)) == -1) {
+                        PLOG(ERROR) << "Failed to set MS_SLAVE at " << obbTargetDir.c_str();
+                        continue;
+                    }
                 }
             }
             _exit(0);
@@ -552,6 +570,44 @@ int VolumeManager::mountPkgSpecificDirsForRunningProcs(
         }
     }
     return 0;
+}
+
+int VolumeManager::getMountModeForRunningProc(const std::vector<std::string>& packagesForUid,
+                                              userid_t userId, struct stat& mntWriteStat) {
+    struct stat storageSb;
+    if (TEMP_FAILURE_RETRY(stat("/storage", &storageSb)) == -1) {
+        PLOG(ERROR) << "Failed to stat /storage";
+        return -1;
+    }
+
+    // Some packages have access to full external storage, identify processes belonging
+    // to those packages by comparing inode no.s of /mnt/runtime/write and /storage
+    if (storageSb.st_dev == mntWriteStat.st_dev && storageSb.st_ino == mntWriteStat.st_ino) {
+        return VoldNativeService::REMOUNT_MODE_FULL;
+    }
+
+    std::string obbMountFile =
+        StringPrintf("/mnt/user/%d/package/%s/obb_mount", userId, packagesForUid[0].c_str());
+    if (access(obbMountFile.c_str(), F_OK) == 0) {
+        return VoldNativeService::REMOUNT_MODE_INSTALLER;
+    }
+
+    // Some packages don't have access to external storage and processes belonging to
+    // those packages don't have anything mounted at /storage. So, identify those
+    // processes by comparing inode no.s of /mnt/user/%d/package/%s
+    // and /storage
+    for (auto& package : packagesForUid) {
+        std::string sandbox = StringPrintf("/mnt/user/%d/package/%s", userId, package.c_str());
+        struct stat sandboxStat;
+        if (TEMP_FAILURE_RETRY(stat(sandbox.c_str(), &sandboxStat)) == -1) {
+            PLOG(ERROR) << "Failed to stat " << sandbox;
+            return -1;
+        }
+        if (storageSb.st_dev == sandboxStat.st_dev && storageSb.st_ino == sandboxStat.st_ino) {
+            return VoldNativeService::REMOUNT_MODE_WRITE;
+        }
+    }
+    return VoldNativeService::REMOUNT_MODE_NONE;
 }
 
 int VolumeManager::prepareSandboxes(userid_t userId, const std::vector<std::string>& packageNames,
@@ -666,7 +722,7 @@ int VolumeManager::prepareSandboxes(userid_t userId, const std::vector<std::stri
             }
         }
     }
-    mountPkgSpecificDirsForRunningProcs(userId, packageNames, visibleVolLabels);
+    mountPkgSpecificDirsForRunningProcs(userId, packageNames, visibleVolLabels, -1);
     return 0;
 }
 
@@ -873,7 +929,8 @@ int VolumeManager::destroySandboxForApp(const std::string& packageName,
     LOG(VERBOSE) << "destroySandboxForApp: " << packageName << ", sandboxId=" << sandboxId
                  << ", userId=" << userId;
     auto& userPackages = mUserPackages[userId];
-    std::remove(userPackages.begin(), userPackages.end(), packageName);
+    userPackages.erase(std::remove(userPackages.begin(), userPackages.end(), packageName),
+                       userPackages.end());
     // If the package is not uninstalled in any other users, remove appId and sandboxId
     // corresponding to it from the internal state.
     bool installedInAnyUser = false;
@@ -1037,11 +1094,55 @@ int VolumeManager::setPrimary(const std::shared_ptr<android::vold::VolumeBase>& 
     return 0;
 }
 
-int VolumeManager::remountUid(uid_t uid, const std::string& mode) {
-    // If the isolated storage is enabled, return -1 since in the isolated storage world, there
-    // are no longer any runtime storage permissions, so this shouldn't be called anymore.
-    if (GetBoolProperty(kIsolatedStorage, false)) {
+int VolumeManager::remountUid(uid_t uid, int32_t mountMode) {
+    if (!GetBoolProperty(kIsolatedStorage, false)) {
+        return remountUidLegacy(uid, mountMode);
+    }
+
+    appid_t appId = multiuser_get_app_id(uid);
+    userid_t userId = multiuser_get_user_id(uid);
+    std::vector<std::string> visibleVolLabels;
+    for (auto& volId : mVisibleVolumeIds) {
+        auto vol = findVolume(volId);
+        userid_t mountUserId = vol->getMountUserId();
+        if (mountUserId == userId || vol->isEmulated()) {
+            visibleVolLabels.push_back(vol->getLabel());
+        }
+    }
+
+    // Finding one package with appId is enough
+    std::vector<std::string> packageNames;
+    for (auto it = mAppIds.begin(); it != mAppIds.end(); ++it) {
+        if (it->second == appId) {
+            packageNames.push_back(it->first);
+            break;
+        }
+    }
+    if (packageNames.empty()) {
+        PLOG(ERROR) << "Failed to find packageName for " << uid;
         return -1;
+    }
+    return mountPkgSpecificDirsForRunningProcs(userId, packageNames, visibleVolLabels, mountMode);
+}
+
+int VolumeManager::remountUidLegacy(uid_t uid, int32_t mountMode) {
+    std::string mode;
+    switch (mountMode) {
+        case VoldNativeService::REMOUNT_MODE_NONE:
+            mode = "none";
+            break;
+        case VoldNativeService::REMOUNT_MODE_DEFAULT:
+            mode = "default";
+            break;
+        case VoldNativeService::REMOUNT_MODE_READ:
+            mode = "read";
+            break;
+        case VoldNativeService::REMOUNT_MODE_WRITE:
+            mode = "write";
+            break;
+        default:
+            PLOG(ERROR) << "Unknown mode " << std::to_string(mountMode);
+            return -1;
     }
     LOG(DEBUG) << "Remounting " << uid << " as mode " << mode;
 
@@ -1221,7 +1322,7 @@ int VolumeManager::unmountAll() {
 
     // Worst case we might have some stale mounts lurking around, so
     // force unmount those just to be safe.
-    FILE* fp = setmntent("/proc/mounts", "r");
+    FILE* fp = setmntent("/proc/mounts", "re");
     if (fp == NULL) {
         PLOG(ERROR) << "Failed to open /proc/mounts";
         return -errno;
@@ -1261,145 +1362,6 @@ int VolumeManager::mkdirs(const std::string& path) {
         LOG(ERROR) << "Failed to find mounted volume for " << path;
         return -EINVAL;
     }
-}
-
-static size_t kAppFuseMaxMountPointName = 32;
-
-static android::status_t getMountPath(uid_t uid, const std::string& name, std::string* path) {
-    if (name.size() > kAppFuseMaxMountPointName) {
-        LOG(ERROR) << "AppFuse mount name is too long.";
-        return -EINVAL;
-    }
-    for (size_t i = 0; i < name.size(); i++) {
-        if (!isalnum(name[i])) {
-            LOG(ERROR) << "AppFuse mount name contains invalid character.";
-            return -EINVAL;
-        }
-    }
-    *path = StringPrintf("/mnt/appfuse/%d_%s", uid, name.c_str());
-    return android::OK;
-}
-
-static android::status_t mountInNamespace(uid_t uid, int device_fd, const std::string& path) {
-    // Remove existing mount.
-    android::vold::ForceUnmount(path);
-
-    const auto opts = StringPrintf(
-        "fd=%i,"
-        "rootmode=40000,"
-        "default_permissions,"
-        "allow_other,"
-        "user_id=%d,group_id=%d,"
-        "context=\"u:object_r:app_fuse_file:s0\","
-        "fscontext=u:object_r:app_fusefs:s0",
-        device_fd, uid, uid);
-
-    const int result =
-        TEMP_FAILURE_RETRY(mount("/dev/fuse", path.c_str(), "fuse",
-                                 MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME, opts.c_str()));
-    if (result != 0) {
-        PLOG(ERROR) << "Failed to mount " << path;
-        return -errno;
-    }
-
-    return android::OK;
-}
-
-static android::status_t runCommandInNamespace(const std::string& command, uid_t uid, pid_t pid,
-                                               const std::string& path, int device_fd) {
-    if (DEBUG_APPFUSE) {
-        LOG(DEBUG) << "Run app fuse command " << command << " for the path " << path
-                   << " in namespace " << uid;
-    }
-
-    unique_fd dir(open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
-    if (dir.get() == -1) {
-        PLOG(ERROR) << "Failed to open /proc";
-        return -errno;
-    }
-
-    // Obtains process file descriptor.
-    const std::string pid_str = StringPrintf("%d", pid);
-    const unique_fd pid_fd(openat(dir.get(), pid_str.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
-    if (pid_fd.get() == -1) {
-        PLOG(ERROR) << "Failed to open /proc/" << pid;
-        return -errno;
-    }
-
-    // Check UID of process.
-    {
-        struct stat sb;
-        const int result = fstat(pid_fd.get(), &sb);
-        if (result == -1) {
-            PLOG(ERROR) << "Failed to stat /proc/" << pid;
-            return -errno;
-        }
-        if (sb.st_uid != AID_SYSTEM) {
-            LOG(ERROR) << "Only system can mount appfuse. UID expected=" << AID_SYSTEM
-                       << ", actual=" << sb.st_uid;
-            return -EPERM;
-        }
-    }
-
-    // Matches so far, but refuse to touch if in root namespace
-    {
-        std::string rootName;
-        std::string pidName;
-        if (!android::vold::Readlinkat(dir.get(), "1/ns/mnt", &rootName) ||
-            !android::vold::Readlinkat(pid_fd.get(), "ns/mnt", &pidName)) {
-            PLOG(ERROR) << "Failed to read namespaces";
-            return -EPERM;
-        }
-        if (rootName == pidName) {
-            LOG(ERROR) << "Don't mount appfuse in root namespace";
-            return -EPERM;
-        }
-    }
-
-    // We purposefully leave the namespace open across the fork
-    unique_fd ns_fd(openat(pid_fd.get(), "ns/mnt", O_RDONLY));  // not O_CLOEXEC
-    if (ns_fd.get() < 0) {
-        PLOG(ERROR) << "Failed to open namespace for /proc/" << pid << "/ns/mnt";
-        return -errno;
-    }
-
-    int child = fork();
-    if (child == 0) {
-        if (setns(ns_fd.get(), CLONE_NEWNS) != 0) {
-            PLOG(ERROR) << "Failed to setns";
-            _exit(-errno);
-        }
-
-        if (command == "mount") {
-            _exit(mountInNamespace(uid, device_fd, path));
-        } else if (command == "unmount") {
-            // If it's just after all FD opened on mount point are closed, umount2 can fail with
-            // EBUSY. To avoid the case, specify MNT_DETACH.
-            if (umount2(path.c_str(), UMOUNT_NOFOLLOW | MNT_DETACH) != 0 && errno != EINVAL &&
-                errno != ENOENT) {
-                PLOG(ERROR) << "Failed to unmount directory.";
-                _exit(-errno);
-            }
-            if (rmdir(path.c_str()) != 0) {
-                PLOG(ERROR) << "Failed to remove the mount directory.";
-                _exit(-errno);
-            }
-            _exit(android::OK);
-        } else {
-            LOG(ERROR) << "Unknown appfuse command " << command;
-            _exit(-EPERM);
-        }
-    }
-
-    if (child == -1) {
-        PLOG(ERROR) << "Failed to folk child process";
-        return -errno;
-    }
-
-    android::status_t status;
-    TEMP_FAILURE_RETRY(waitpid(child, &status, 0));
-
-    return status;
 }
 
 int VolumeManager::createObb(const std::string& sourcePath, const std::string& sourceKey,
@@ -1454,43 +1416,14 @@ int VolumeManager::destroyStubVolume(const std::string& volId) {
     return android::OK;
 }
 
-int VolumeManager::mountAppFuse(uid_t uid, pid_t pid, int mountId, unique_fd* device_fd) {
-    std::string name = std::to_string(mountId);
-
-    // Check mount point name.
-    std::string path;
-    if (getMountPath(uid, name, &path) != android::OK) {
-        LOG(ERROR) << "Invalid mount point name";
-        return -1;
-    }
-
-    // Create directories.
-    const android::status_t result = android::vold::PrepareDir(path, 0700, 0, 0);
-    if (result != android::OK) {
-        PLOG(ERROR) << "Failed to prepare directory " << path;
-        return -1;
-    }
-
-    // Open device FD.
-    device_fd->reset(open("/dev/fuse", O_RDWR));  // not O_CLOEXEC
-    if (device_fd->get() == -1) {
-        PLOG(ERROR) << "Failed to open /dev/fuse";
-        return -1;
-    }
-
-    // Mount.
-    return runCommandInNamespace("mount", uid, pid, path, device_fd->get());
+int VolumeManager::mountAppFuse(uid_t uid, int mountId, unique_fd* device_fd) {
+    return android::vold::MountAppFuse(uid, mountId, device_fd);
 }
 
-int VolumeManager::unmountAppFuse(uid_t uid, pid_t pid, int mountId) {
-    std::string name = std::to_string(mountId);
+int VolumeManager::unmountAppFuse(uid_t uid, int mountId) {
+    return android::vold::UnmountAppFuse(uid, mountId);
+}
 
-    // Check mount point name.
-    std::string path;
-    if (getMountPath(uid, name, &path) != android::OK) {
-        LOG(ERROR) << "Invalid mount point name";
-        return -1;
-    }
-
-    return runCommandInNamespace("unmount", uid, pid, path, -1 /* device_fd */);
+int VolumeManager::openAppFuseFile(uid_t uid, int mountId, int fileId, int flags) {
+    return android::vold::OpenAppFuseFile(uid, mountId, fileId, flags);
 }

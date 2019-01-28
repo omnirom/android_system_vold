@@ -31,6 +31,7 @@ cc_defaults {
         "libbootloader_message",
         "libfec",
         "libfec_rs",
+        "libfs_avb",
         "libfs_mgr",
         "libscrypt_static",
         "libsquashfs_utils",
@@ -95,6 +96,7 @@ cc_library_static {
     ],
 
     srcs: [
+        "AppFuseUtil.cpp",
         "Benchmark.cpp",
         "CheckEncryption.cpp",
         "Checkpoint.cpp",
@@ -135,10 +137,12 @@ cc_library_static {
     product_variables: {
         arc: {
             exclude_srcs: [
+                "AppFuseUtil.cpp",
                 "model/ObbVolume.cpp",
             ],
             static_libs: [
                 "arc_services_aidl",
+                "libarcappfuse",
                 "libarcobbvolume",
             ],
         },
@@ -172,6 +176,7 @@ cc_binary {
         arc: {
             static_libs: [
                 "arc_services_aidl",
+                "libarcappfuse",
                 "libarcobbvolume",
             ],
         },

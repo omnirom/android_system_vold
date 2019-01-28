@@ -26,6 +26,7 @@
 #include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/parseint.h>
+#include <android-base/properties.h>
 #include <android-base/unique_fd.h>
 #include <android/hardware/boot/1.0/IBootControl.h>
 #include <cutils/android_reboot.h>
@@ -36,6 +37,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 
+using android::base::SetProperty;
 using android::binder::Status;
 using android::hardware::hidl_string;
 using android::hardware::boot::V1_0::BoolResult;
@@ -81,7 +83,15 @@ Status cp_startCheckpoint(int retry) {
     return Status::ok();
 }
 
+namespace {
+
+bool isCheckpointing = false;
+}
+
 Status cp_commitChanges() {
+    if (!isCheckpointing) {
+        return Status::ok();
+    }
     // Must take action for list of mounted checkpointed things here
     // To do this, we walk the list of mounted file systems.
     // But we also need to get the matching fstab entries to see
@@ -104,14 +114,19 @@ Status cp_commitChanges() {
 
         if (fs_mgr_is_checkpoint_fs(fstab_rec)) {
             if (!strcmp(fstab_rec->fs_type, "f2fs")) {
-                mount(mount_rec->blk_device, mount_rec->mount_point, "none",
-                      MS_REMOUNT | fstab_rec->flags, "checkpoint=enable");
+                if (mount(mount_rec->blk_device, mount_rec->mount_point, "none",
+                          MS_REMOUNT | fstab_rec->flags, "checkpoint=enable")) {
+                    return Status::fromExceptionCode(EINVAL, "Failed to remount");
+                }
             }
         } else if (fs_mgr_is_checkpoint_blk(fstab_rec)) {
-            setBowState(mount_rec->blk_device, "2");
+            if (!setBowState(mount_rec->blk_device, "2"))
+                return Status::fromExceptionCode(EINVAL, "Failed to set bow state");
         }
     }
-    if (android::base::RemoveFileIfExists(kMetadataCPFile, &err_str))
+    SetProperty("vold.checkpoint_committed", "1");
+    isCheckpointing = false;
+    if (!android::base::RemoveFileIfExists(kMetadataCPFile, &err_str))
         return Status::fromExceptionCode(errno, err_str.c_str());
     return Status::ok();
 }
@@ -148,10 +163,16 @@ bool cp_needsCheckpoint() {
     std::string content;
     sp<IBootControl> module = IBootControl::getService();
 
-    if (module && module->isSlotMarkedSuccessful(module->getCurrentSlot()) == BoolResult::FALSE)
+    if (module && module->isSlotMarkedSuccessful(module->getCurrentSlot()) == BoolResult::FALSE) {
+        isCheckpointing = true;
         return true;
+    }
     ret = android::base::ReadFileToString(kMetadataCPFile, &content);
-    if (ret) return content != "0";
+    if (ret) {
+        ret = content != "0";
+        isCheckpointing = ret;
+        return ret;
+    }
     return false;
 }
 
@@ -275,9 +296,9 @@ Status cp_restoreCheckpoint(const std::string& blockDevice) {
         PLOG(ERROR) << "Cannot open " << blockDevice;
         return Status::fromExceptionCode(errno, ("Cannot open " + blockDevice).c_str());
     }
-    char buffer[kBlockSize];
-    device.read(buffer, kBlockSize);
-    log_sector& ls = *(log_sector*)buffer;
+    alignas(alignof(log_sector)) char ls_buffer[kBlockSize];
+    device.read(ls_buffer, kBlockSize);
+    log_sector& ls = *reinterpret_cast<log_sector*>(ls_buffer);
     if (ls.magic != kMagic) {
         LOG(ERROR) << "No magic";
         return Status::fromExceptionCode(EINVAL, "No magic");
@@ -286,10 +307,9 @@ Status cp_restoreCheckpoint(const std::string& blockDevice) {
     LOG(INFO) << "Restoring " << ls.sequence << " log sectors";
 
     for (int sequence = ls.sequence; sequence >= 0; sequence--) {
-        char buffer[kBlockSize];
         device.seekg(0);
-        device.read(buffer, kBlockSize);
-        log_sector& ls = *(log_sector*)buffer;
+        device.read(ls_buffer, kBlockSize);
+        ls = *reinterpret_cast<log_sector*>(ls_buffer);
         if (ls.magic != kMagic) {
             LOG(ERROR) << "No magic!";
             return Status::fromExceptionCode(EINVAL, "No magic");

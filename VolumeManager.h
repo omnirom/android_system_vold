@@ -38,8 +38,6 @@
 #include "model/Disk.h"
 #include "model/VolumeBase.h"
 
-#define DEBUG_APPFUSE 0
-
 class VolumeManager {
   private:
     static VolumeManager* sInstance;
@@ -54,7 +52,7 @@ class VolumeManager {
     std::mutex& getCryptLock() { return mCryptLock; }
 
     void setListener(android::sp<android::os::IVoldListener> listener) { mListener = listener; }
-    android::sp<android::os::IVoldListener> getListener() { return mListener; }
+    android::sp<android::os::IVoldListener> getListener() const { return mListener; }
 
     int start();
     int stop();
@@ -70,8 +68,8 @@ class VolumeManager {
             return !fnmatch(mSysPattern.c_str(), sysPath.c_str(), 0);
         }
 
-        const std::string& getNickname() { return mNickname; }
-        int getFlags() { return mFlags; }
+        const std::string& getNickname() const { return mNickname; }
+        int getFlags() const { return mFlags; }
 
       private:
         std::string mSysPattern;
@@ -84,7 +82,7 @@ class VolumeManager {
     std::shared_ptr<android::vold::Disk> findDisk(const std::string& id);
     std::shared_ptr<android::vold::VolumeBase> findVolume(const std::string& id);
 
-    void listVolumes(android::vold::VolumeBase::Type type, std::list<std::string>& list);
+    void listVolumes(android::vold::VolumeBase::Type type, std::list<std::string>& list) const;
 
     int forgetPartition(const std::string& partGuid, const std::string& fsUuid);
 
@@ -109,7 +107,8 @@ class VolumeManager {
 
     int setPrimary(const std::shared_ptr<android::vold::VolumeBase>& vol);
 
-    int remountUid(uid_t uid, const std::string& mode);
+    int remountUid(uid_t uid, int32_t remountMode);
+    int remountUidLegacy(uid_t uid, int32_t remountMode);
 
     /* Reset all internal state, typically during framework boot */
     int reset();
@@ -141,8 +140,9 @@ class VolumeManager {
                          const std::string& fsLabel, std::string* outVolId);
     int destroyStubVolume(const std::string& volId);
 
-    int mountAppFuse(uid_t uid, pid_t pid, int mountId, android::base::unique_fd* device_fd);
-    int unmountAppFuse(uid_t uid, pid_t pid, int mountId);
+    int mountAppFuse(uid_t uid, int mountId, android::base::unique_fd* device_fd);
+    int unmountAppFuse(uid_t uid, int mountId);
+    int openAppFuseFile(uid_t uid, int mountId, int fileId, int flags);
 
   private:
     VolumeManager();
@@ -154,7 +154,8 @@ class VolumeManager {
                          const std::vector<std::string>& visibleVolLabels);
     int mountPkgSpecificDirsForRunningProcs(userid_t userId,
                                             const std::vector<std::string>& packageNames,
-                                            const std::vector<std::string>& visibleVolLabels);
+                                            const std::vector<std::string>& visibleVolLabels,
+                                            int remountMode);
     int destroySandboxesForVol(android::vold::VolumeBase* vol, userid_t userId);
     std::string prepareSandboxSource(uid_t uid, const std::string& sandboxId,
                                      const std::string& sandboxRootDir);
@@ -172,6 +173,8 @@ class VolumeManager {
                             const std::string& packageName, const char* dirName);
     int destroySandboxForAppOnVol(const std::string& packageName, const std::string& sandboxId,
                                   userid_t userId, const std::string& volLabel);
+    int getMountModeForRunningProc(const std::vector<std::string>& packagesForUid, userid_t userId,
+                                   struct stat& mntWriteStat);
 
     void handleDiskAdded(const std::shared_ptr<android::vold::Disk>& disk);
     void handleDiskChanged(dev_t device);
