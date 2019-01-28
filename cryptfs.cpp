@@ -62,6 +62,7 @@
 #include "Process.h"
 #include "Keymaster.h"
 #include "android-base/properties.h"
+#include "android-base/stringprintf.h"
 #include <bootloader_message/bootloader_message.h>
 #ifdef CONFIG_HW_DISK_ENCRYPTION
 #include <cryptfs_hw.h>
@@ -69,6 +70,8 @@
 extern "C" {
 #include <crypto_scrypt.h>
 }
+
+using android::base::StringPrintf;
 
 #define UNUSED __attribute__((unused))
 
@@ -467,6 +470,10 @@ constexpr CryptoType default_crypto_type = CryptoType()
 
 constexpr CryptoType supported_crypto_types[] = {
     default_crypto_type,
+    CryptoType()
+        .set_property_name("adiantum")
+        .set_crypto_name("xchacha12,aes-adiantum-plain64")
+        .set_keysize(32),
     // Add new CryptoTypes here.  Order is not important.
 };
 
@@ -1235,7 +1242,6 @@ static int get_dm_crypt_version(int fd, const char *name,  int *version)
     return -1;
 }
 
-#ifndef CONFIG_HW_DISK_ENCRYPTION
 static std::string extra_params_as_string(const std::vector<std::string>& extra_params_vec) {
     if (extra_params_vec.empty()) return "";
     std::string extra_params = std::to_string(extra_params_vec.size());
@@ -1245,7 +1251,21 @@ static std::string extra_params_as_string(const std::vector<std::string>& extra_
     }
     return extra_params;
 }
-#endif
+
+// Only adds parameters if the property is set.
+static void add_sector_size_param(std::vector<std::string>* extra_params_vec) {
+    constexpr char DM_CRYPT_SECTOR_SIZE[] = "ro.crypto.fde_sector_size";
+    char sector_size[PROPERTY_VALUE_MAX];
+
+    if (property_get(DM_CRYPT_SECTOR_SIZE, sector_size, "") > 0) {
+        std::string param = StringPrintf("sector_size:%s", sector_size);
+        extra_params_vec->push_back(std::move(param));
+
+        // With this option, IVs will match the sector numbering, instead
+        // of being hard-coded to being based on 512-byte sectors.
+        extra_params_vec->emplace_back("iv_large_sectors");
+    }
+}
 
 static int create_crypto_blk_dev(struct crypt_mnt_ftr* crypt_ftr, const unsigned char* master_key,
                                  const char* real_blk_name, char* crypto_blk_name, const char* name,
@@ -1262,9 +1282,8 @@ static int create_crypto_blk_dev(struct crypt_mnt_ftr* crypt_ftr, const unsigned
     char encrypted_state[PROPERTY_VALUE_MAX] = {0};
     char progress[PROPERTY_VALUE_MAX] = {0};
     const char *extra_params;
-#else
-    std::vector<std::string> extra_params_vec;
 #endif
+    std::vector<std::string> extra_params_vec;
 
     if ((fd = open("/dev/device-mapper", O_RDWR | O_CLOEXEC)) < 0) {
         SLOGE("Cannot open device-mapper\n");
@@ -1325,8 +1344,7 @@ static int create_crypto_blk_dev(struct crypt_mnt_ftr* crypt_ftr, const unsigned
         }
       }
     }
-    load_count = load_crypto_mapping_table(crypt_ftr, master_key, real_blk_name, name, fd,
-                                           extra_params);
+    extra_params_vec.emplace_back(extra_params);
 #else
     if (!get_dm_crypt_version(fd, name, version)) {
         /* Support for allow_discards was added in version 1.11.0 */
@@ -1337,9 +1355,10 @@ static int create_crypto_blk_dev(struct crypt_mnt_ftr* crypt_ftr, const unsigned
     if (flags & CREATE_CRYPTO_BLK_DEV_FLAGS_ALLOW_ENCRYPT_OVERRIDE) {
         extra_params_vec.emplace_back("allow_encrypt_override");
     }
+#endif
+    add_sector_size_param(&extra_params_vec);
     load_count = load_crypto_mapping_table(crypt_ftr, master_key, real_blk_name, name, fd,
                                            extra_params_as_string(extra_params_vec).c_str());
-#endif
     if (load_count < 0) {
         SLOGE("Cannot load dm-crypt mapping table.\n");
         goto errout;
