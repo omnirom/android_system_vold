@@ -58,6 +58,7 @@
 #include <android-base/logging.h>
 #include <android-base/properties.h>
 #include <android-base/stringprintf.h>
+#include <android-base/unique_fd.h>
 
 using android::base::StringPrintf;
 using android::base::WriteStringToFile;
@@ -178,8 +179,10 @@ static void fixate_user_ce_key(const std::string& directory_path, const std::str
         LOG(DEBUG) << "Renaming " << to_fix << " to " << current_path;
         if (rename(to_fix.c_str(), current_path.c_str()) != 0) {
             PLOG(WARNING) << "Unable to rename " << to_fix << " to " << current_path;
+            return;
         }
     }
+    android::vold::FsyncDirectory(directory_path);
 }
 
 static bool read_and_fixate_user_ce_key(userid_t user_id,
@@ -670,6 +673,7 @@ bool e4crypt_add_user_key_auth(userid_t user_id, int serial, const std::string& 
     std::string ce_key_path;
     if (!get_ce_key_new_path(directory_path, paths, &ce_key_path)) return false;
     if (!android::vold::storeKeyAtomically(ce_key_path, user_key_temp, auth, ce_key)) return false;
+    if (!android::vold::FsyncDirectory(directory_path)) return false;
     return true;
 }
 
