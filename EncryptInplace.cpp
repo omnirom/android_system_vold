@@ -285,8 +285,7 @@ static int cryptfs_enable_inplace_ext4(char* crypto_blkdev, char* real_blkdev, o
     }
 
     LOG(DEBUG) << "Opening" << crypto_blkdev;
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_PERF)
-    if (is_ice_enabled())
+    if (!strncmp(real_blkdev, crypto_blkdev, strlen(real_blkdev)))
         data.cryptofd = data.realfd;
     else {
         // Wait until the block device appears.  Re-use the mount retry values since it is reasonable.
@@ -305,21 +304,6 @@ static int cryptfs_enable_inplace_ext4(char* crypto_blkdev, char* real_blkdev, o
             }
         }
     }
-#else
-    // Wait until the block device appears.  Re-use the mount retry values since it is reasonable.
-    while ((data.cryptofd = open(crypto_blkdev, O_WRONLY|O_CLOEXEC)) < 0) {
-        if (--retries) {
-            PLOG(ERROR) << "Error opening crypto_blkdev " << crypto_blkdev
-                        << " for ext4 inplace encrypt, retrying";
-            sleep(RETRY_MOUNT_DELAY_SECONDS);
-        } else {
-            PLOG(ERROR) << "Error opening crypto_blkdev " << crypto_blkdev
-                        << " for ext4 inplace encrypt";
-            rc = ENABLE_INPLACE_ERR_DEV;
-            goto errout;
-        }
-    }
-#endif
 
     if (setjmp(setjmp_env)) { // NOLINT
         LOG(ERROR) << "Reading ext4 extent caused an exception";
@@ -365,12 +349,8 @@ static int cryptfs_enable_inplace_ext4(char* crypto_blkdev, char* real_blkdev, o
 
 errout:
     close(data.realfd);
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_PERF)
-    if (!is_ice_enabled())
+    if (!strncmp(real_blkdev, crypto_blkdev, strlen(real_blkdev)))
        close(data.cryptofd);
-#else
-    close(data.cryptofd);
-#endif
 
     return rc;
 }
@@ -446,8 +426,7 @@ static int cryptfs_enable_inplace_f2fs(char* crypto_blkdev, char* real_blkdev, o
         PLOG(ERROR) << "Error opening real_blkdev " << real_blkdev << " for f2fs inplace encrypt";
         goto errout;
     }
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_PERF)
-    if (is_ice_enabled())
+    if (!strncmp(real_blkdev, crypto_blkdev, strlen(real_blkdev)))
         data.cryptofd = data.realfd;
     else {
         if ((data.cryptofd = open64(crypto_blkdev, O_WRONLY|O_CLOEXEC)) < 0) {
@@ -458,14 +437,6 @@ static int cryptfs_enable_inplace_f2fs(char* crypto_blkdev, char* real_blkdev, o
             goto errout;
         }
     }
-#else
-    if ( (data.cryptofd = open64(crypto_blkdev, O_WRONLY|O_CLOEXEC)) < 0) {
-        PLOG(ERROR) << "Error opening crypto_blkdev " << crypto_blkdev
-                    << " for f2fs inplace encrypt";
-        rc = ENABLE_INPLACE_ERR_DEV;
-        goto errout;
-    }
-#endif
 
     f2fs_info = generate_f2fs_info(data.realfd);
     if (!f2fs_info)
@@ -509,12 +480,8 @@ errout:
     free(f2fs_info);
     free(data.buffer);
     close(data.realfd);
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_PERF)
-    if (!is_ice_enabled())
+    if (!strncmp(real_blkdev, crypto_blkdev, strlen(real_blkdev)))
         close(data.cryptofd);
-#else
-    close(data.cryptofd);
-#endif
 
     return rc;
 }
@@ -535,8 +502,7 @@ static int cryptfs_enable_inplace_full(char* crypto_blkdev, char* real_blkdev, o
         return ENABLE_INPLACE_ERR_OTHER;
     }
 
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_PERF)
-    if (is_ice_enabled())
+    if (!strncmp(real_blkdev, crypto_blkdev, strlen(real_blkdev)))
         cryptofd = realfd;
     else {
         if ((cryptofd = open(crypto_blkdev, O_WRONLY|O_CLOEXEC)) < 0) {
@@ -547,13 +513,6 @@ static int cryptfs_enable_inplace_full(char* crypto_blkdev, char* real_blkdev, o
             return ENABLE_INPLACE_ERR_DEV;
         }
     }
-#else
-    if ( (cryptofd = open(crypto_blkdev, O_WRONLY|O_CLOEXEC)) < 0) {
-        PLOG(ERROR) << "Error opening crypto_blkdev " << crypto_blkdev << " for inplace encrypt";
-        close(realfd);
-        return ENABLE_INPLACE_ERR_DEV;
-    }
-#endif
 
     /* This is pretty much a simple loop of reading 4K, and writing 4K.
      * The size passed in is the number of 512 byte sectors in the filesystem.
@@ -574,19 +533,12 @@ static int cryptfs_enable_inplace_full(char* crypto_blkdev, char* real_blkdev, o
         goto errout;
     }
 
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_PERF)
-    if (!is_ice_enabled()) {
+    if (!strncmp(real_blkdev, crypto_blkdev, strlen(real_blkdev))) {
         if (lseek64(cryptofd, i * CRYPT_SECTOR_SIZE, SEEK_SET) < 0) {
             PLOG(ERROR) << "Cannot seek to previously encrypted point on " << crypto_blkdev;
             goto errout;
         }
     }
-#else
-    if (lseek64(cryptofd, i * CRYPT_SECTOR_SIZE, SEEK_SET) < 0) {
-        PLOG(ERROR) << "Cannot seek to previously encrypted point on " << crypto_blkdev;
-        goto errout;
-    }
-#endif
 
     for (;i < size && i % CRYPT_SECTORS_PER_BUFSIZE != 0; ++i) {
         if (unix_read(realfd, buf, CRYPT_SECTOR_SIZE) <= 0) {
@@ -649,12 +601,8 @@ static int cryptfs_enable_inplace_full(char* crypto_blkdev, char* real_blkdev, o
 
 errout:
     close(realfd);
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_PERF)
-    if (!is_ice_enabled())
+    if (!strncmp(real_blkdev, crypto_blkdev, strlen(real_blkdev)))
         close(cryptofd);
-#else
-    close(cryptofd);
-#endif
 
     return rc;
 }
