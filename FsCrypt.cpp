@@ -62,6 +62,7 @@
 
 using android::base::StringPrintf;
 using android::base::WriteStringToFile;
+using android::fs_mgr::GetEntryForMountPoint;
 using android::vold::kEmptyAuthentication;
 using android::vold::KeyBuffer;
 using android::vold::Keymaster;
@@ -202,8 +203,7 @@ static bool read_and_fixate_user_ce_key(userid_t user_id,
 }
 
 bool is_wrapped_key_supported() {
-    return fs_mgr_is_wrapped_key_supported(
-        fs_mgr_get_entry_for_mount_point(fstab_default, DATA_MNT_POINT));
+    return GetEntryForMountPoint(&fstab_default, DATA_MNT_POINT)->fs_mgr_flags.wrapped_key;
 }
 
 bool is_wrapped_key_supported_external() {
@@ -327,12 +327,12 @@ static bool lookup_key_ref(const std::map<userid_t, std::string>& key_map, useri
 }
 
 static void get_data_file_encryption_modes(PolicyKeyRef* key_ref) {
-    struct fstab_rec* rec = fs_mgr_get_entry_for_mount_point(fstab_default, DATA_MNT_POINT);
-    char const* contents_mode;
-    char const* filenames_mode;
-    fs_mgr_get_file_encryption_modes(rec, &contents_mode, &filenames_mode);
-    key_ref->contents_mode = contents_mode;
-    key_ref->filenames_mode = filenames_mode;
+    auto entry = GetEntryForMountPoint(&fstab_default, DATA_MNT_POINT);
+    if (entry == nullptr) {
+        return;
+    }
+    key_ref->contents_mode = entry->file_contents_mode;
+    key_ref->filenames_mode = entry->file_names_mode;
 }
 
 static bool ensure_policy(const PolicyKeyRef& key_ref, const std::string& path) {

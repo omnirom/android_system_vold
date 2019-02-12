@@ -16,6 +16,7 @@
 
 #define LOG_TAG "Checkpoint"
 #include "Checkpoint.h"
+#include "VoldUtil.h"
 
 #include <fstream>
 #include <list>
@@ -39,6 +40,9 @@
 
 using android::base::SetProperty;
 using android::binder::Status;
+using android::fs_mgr::Fstab;
+using android::fs_mgr::ReadDefaultFstab;
+using android::fs_mgr::ReadFstabFromFile;
 using android::hardware::hidl_string;
 using android::hardware::boot::V1_0::BoolResult;
 using android::hardware::boot::V1_0::IBootControl;
@@ -66,6 +70,18 @@ bool setBowState(std::string const& block_device, std::string const& state) {
 }
 
 }  // namespace
+
+Status cp_supportsCheckpoint(bool& result) {
+    result = false;
+
+    for (const auto& entry : fstab_default) {
+        if (entry.fs_mgr_flags.checkpoint_blk || entry.fs_mgr_flags.checkpoint_fs) {
+            result = true;
+            return Status::ok();
+        }
+    }
+    return Status::ok();
+}
 
 Status cp_startCheckpoint(int retry) {
     if (retry < -1) return Status::fromExceptionCode(EINVAL, "Retry count must be more than -1");
@@ -97,30 +113,27 @@ Status cp_commitChanges() {
     // But we also need to get the matching fstab entries to see
     // the original flags
     std::string err_str;
-    auto fstab_default = std::unique_ptr<fstab, decltype(&fs_mgr_free_fstab)>{
-        fs_mgr_read_fstab_default(), fs_mgr_free_fstab};
-    if (!fstab_default) return Status::fromExceptionCode(EINVAL, "Failed to get fstab");
 
-    auto mounts = std::unique_ptr<fstab, decltype(&fs_mgr_free_fstab)>{
-        fs_mgr_read_fstab("/proc/mounts"), fs_mgr_free_fstab};
-    if (!mounts) return Status::fromExceptionCode(EINVAL, "Failed to get /proc/mounts");
+    Fstab mounts;
+    if (!ReadFstabFromFile("/proc/mounts", &mounts)) {
+        return Status::fromExceptionCode(EINVAL, "Failed to get /proc/mounts");
+    }
 
     // Walk mounted file systems
-    for (int i = 0; i < mounts->num_entries; ++i) {
-        const fstab_rec* mount_rec = &mounts->recs[i];
-        const fstab_rec* fstab_rec =
-            fs_mgr_get_entry_for_mount_point(fstab_default.get(), mount_rec->mount_point);
+    for (const auto& mount_rec : mounts) {
+        const auto fstab_rec = GetEntryForMountPoint(&fstab_default, mount_rec.mount_point);
         if (!fstab_rec) continue;
 
-        if (fs_mgr_is_checkpoint_fs(fstab_rec)) {
-            if (!strcmp(fstab_rec->fs_type, "f2fs")) {
-                if (mount(mount_rec->blk_device, mount_rec->mount_point, "none",
-                          MS_REMOUNT | fstab_rec->flags, "checkpoint=enable")) {
+        if (fstab_rec->fs_mgr_flags.checkpoint_fs) {
+            if (fstab_rec->fs_type == "f2fs") {
+                std::string options = mount_rec.fs_options + ",checkpoint=enable";
+                if (mount(mount_rec.blk_device.c_str(), mount_rec.mount_point.c_str(), "none",
+                          MS_REMOUNT | fstab_rec->flags, options.c_str())) {
                     return Status::fromExceptionCode(EINVAL, "Failed to remount");
                 }
             }
-        } else if (fs_mgr_is_checkpoint_blk(fstab_rec)) {
-            if (!setBowState(mount_rec->blk_device, "2"))
+        } else if (fstab_rec->fs_mgr_flags.checkpoint_blk) {
+            if (!setBowState(mount_rec.blk_device, "2"))
                 return Status::fromExceptionCode(EINVAL, "Failed to set bow state");
         }
     }
@@ -177,36 +190,31 @@ bool cp_needsCheckpoint() {
 }
 
 Status cp_prepareCheckpoint() {
-    auto fstab_default = std::unique_ptr<fstab, decltype(&fs_mgr_free_fstab)>{
-        fs_mgr_read_fstab_default(), fs_mgr_free_fstab};
-    if (!fstab_default) return Status::fromExceptionCode(EINVAL, "Failed to get fstab");
+    Fstab mounts;
+    if (!ReadFstabFromFile("/proc/mounts", &mounts)) {
+        return Status::fromExceptionCode(EINVAL, "Failed to get /proc/mounts");
+    }
 
-    auto mounts = std::unique_ptr<fstab, decltype(&fs_mgr_free_fstab)>{
-        fs_mgr_read_fstab("/proc/mounts"), fs_mgr_free_fstab};
-    if (!mounts) return Status::fromExceptionCode(EINVAL, "Failed to get /proc/mounts");
-
-    for (int i = 0; i < mounts->num_entries; ++i) {
-        const fstab_rec* mount_rec = &mounts->recs[i];
-        const fstab_rec* fstab_rec =
-            fs_mgr_get_entry_for_mount_point(fstab_default.get(), mount_rec->mount_point);
+    for (const auto& mount_rec : mounts) {
+        const auto fstab_rec = GetEntryForMountPoint(&fstab_default, mount_rec.mount_point);
         if (!fstab_rec) continue;
 
-        if (fs_mgr_is_checkpoint_blk(fstab_rec)) {
+        if (fstab_rec->fs_mgr_flags.checkpoint_blk) {
             android::base::unique_fd fd(
-                TEMP_FAILURE_RETRY(open(mount_rec->mount_point, O_RDONLY | O_CLOEXEC)));
+                TEMP_FAILURE_RETRY(open(mount_rec.mount_point.c_str(), O_RDONLY | O_CLOEXEC)));
             if (!fd) {
-                PLOG(ERROR) << "Failed to open mount point" << mount_rec->mount_point;
+                PLOG(ERROR) << "Failed to open mount point" << mount_rec.mount_point;
                 continue;
             }
 
             struct fstrim_range range = {};
             range.len = ULLONG_MAX;
             if (ioctl(fd, FITRIM, &range)) {
-                PLOG(ERROR) << "Failed to trim " << mount_rec->mount_point;
+                PLOG(ERROR) << "Failed to trim " << mount_rec.mount_point;
                 continue;
             }
 
-            setBowState(mount_rec->blk_device, "1");
+            setBowState(mount_rec.blk_device, "1");
         }
     }
     return Status::ok();
