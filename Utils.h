@@ -127,11 +127,14 @@ bool Readlinkat(int dirfd, const std::string& path, std::string* result);
 /* Checks if Android is running in QEMU */
 bool IsRunningInEmulator();
 
-status_t UnmountTree(const std::string& prefix);
+status_t UnmountTreeWithPrefix(const std::string& prefix);
+status_t UnmountTree(const std::string& mountPoint);
 
 status_t DeleteDirContentsAndDir(const std::string& pathname);
 
 status_t WaitForFile(const char* filename, std::chrono::nanoseconds timeout);
+
+bool FsyncDirectory(const std::string& dirname);
 
 }  // namespace vold
 }  // namespace android
