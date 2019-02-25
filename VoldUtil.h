@@ -14,17 +14,15 @@
  * limitations under the License.
  */
 
-#ifndef _VOLDUTIL_H
-#define _VOLDUTIL_H
+#pragma once
 
 #include <fstab/fstab.h>
 #include <sys/cdefs.h>
 
-extern struct fstab* fstab_default;
+extern android::fs_mgr::Fstab fstab_default;
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(*(a)))
 
 #ifdef CONFIG_HW_DISK_ENCRYPT_PERF
 void get_blkdev_start_sector(int fd, unsigned long* st_sec);
-#endif
 #endif
