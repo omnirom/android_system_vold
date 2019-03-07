@@ -193,8 +193,30 @@ status_t KillProcessesUsingPath(const std::string& path) {
 }
 
 status_t BindMount(const std::string& source, const std::string& target) {
-    if (::mount(source.c_str(), target.c_str(), "", MS_BIND, NULL)) {
+    if (UnmountTree(target) < 0) {
+        return -errno;
+    }
+    if (TEMP_FAILURE_RETRY(mount(source.c_str(), target.c_str(), nullptr, MS_BIND, nullptr)) < 0) {
         PLOG(ERROR) << "Failed to bind mount " << source << " to " << target;
+        return -errno;
+    }
+    return OK;
+}
+
+status_t Symlink(const std::string& target, const std::string& linkpath) {
+    if (Unlink(linkpath) < 0) {
+        return -errno;
+    }
+    if (TEMP_FAILURE_RETRY(symlink(target.c_str(), linkpath.c_str())) < 0) {
+        PLOG(ERROR) << "Failed to create symlink " << linkpath << " to " << target;
+        return -errno;
+    }
+    return OK;
+}
+
+status_t Unlink(const std::string& linkpath) {
+    if (TEMP_FAILURE_RETRY(unlink(linkpath.c_str())) < 0 && errno != EINVAL && errno != ENOENT) {
+        PLOG(ERROR) << "Failed to unlink " << linkpath;
         return -errno;
     }
     return OK;
@@ -202,12 +224,15 @@ status_t BindMount(const std::string& source, const std::string& target) {
 
 bool FindValue(const std::string& raw, const std::string& key, std::string* value) {
     auto qual = key + "=\"";
-    auto start = raw.find(qual);
-    if (start > 0 && raw[start - 1] != ' ') {
-        start = raw.find(qual, start + 1);
+    size_t start = 0;
+    while (true) {
+        start = raw.find(qual, start);
+        if (start == std::string::npos) return false;
+        if (start == 0 || raw[start - 1] == ' ') {
+            break;
+        }
+        start += 1;
     }
-
-    if (start == std::string::npos) return false;
     start += qual.length();
 
     auto end = raw.find("\"", start);
@@ -797,7 +822,8 @@ status_t UnmountTreeWithPrefix(const std::string& prefix) {
 }
 
 status_t UnmountTree(const std::string& mountPoint) {
-    if (umount2(mountPoint.c_str(), MNT_DETACH)) {
+    if (TEMP_FAILURE_RETRY(umount2(mountPoint.c_str(), MNT_DETACH)) < 0 && errno != EINVAL &&
+        errno != ENOENT) {
         PLOG(ERROR) << "Failed to unmount " << mountPoint;
         return -errno;
     }
