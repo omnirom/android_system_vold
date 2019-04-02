@@ -991,6 +991,14 @@ binder::Status VoldNativeService::restoreCheckpoint(const std::string& mountPoin
     return cp_restoreCheckpoint(mountPoint);
 }
 
+binder::Status VoldNativeService::restoreCheckpointPart(const std::string& mountPoint, int count) {
+    ENFORCE_UID(AID_SYSTEM);
+    CHECK_ARGUMENT_PATH(mountPoint);
+    ACQUIRE_LOCK;
+
+    return cp_restoreCheckpoint(mountPoint, count);
+}
+
 binder::Status VoldNativeService::markBootAttempt() {
     ENFORCE_UID(AID_SYSTEM);
     ACQUIRE_LOCK;
@@ -998,11 +1006,12 @@ binder::Status VoldNativeService::markBootAttempt() {
     return cp_markBootAttempt();
 }
 
-binder::Status VoldNativeService::abortChanges() {
+binder::Status VoldNativeService::abortChanges(const std::string& message, bool retry) {
     ENFORCE_UID(AID_SYSTEM);
     ACQUIRE_LOCK;
 
-    return cp_abortChanges();
+    cp_abortChanges(message, retry);
+    return ok();
 }
 
 binder::Status VoldNativeService::supportsCheckpoint(bool* _aidl_return) {
@@ -1010,6 +1019,20 @@ binder::Status VoldNativeService::supportsCheckpoint(bool* _aidl_return) {
     ACQUIRE_LOCK;
 
     return cp_supportsCheckpoint(*_aidl_return);
+}
+
+binder::Status VoldNativeService::supportsBlockCheckpoint(bool* _aidl_return) {
+    ENFORCE_UID(AID_SYSTEM);
+    ACQUIRE_LOCK;
+
+    return cp_supportsBlockCheckpoint(*_aidl_return);
+}
+
+binder::Status VoldNativeService::supportsFileCheckpoint(bool* _aidl_return) {
+    ENFORCE_UID(AID_SYSTEM);
+    ACQUIRE_LOCK;
+
+    return cp_supportsFileCheckpoint(*_aidl_return);
 }
 
 }  // namespace vold

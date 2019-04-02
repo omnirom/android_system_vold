@@ -25,11 +25,15 @@ namespace vold {
 
 android::binder::Status cp_supportsCheckpoint(bool& result);
 
+android::binder::Status cp_supportsBlockCheckpoint(bool& result);
+
+android::binder::Status cp_supportsFileCheckpoint(bool& result);
+
 android::binder::Status cp_startCheckpoint(int retry);
 
 android::binder::Status cp_commitChanges();
 
-android::binder::Status cp_abortChanges();
+void cp_abortChanges(const std::string& message, bool retry);
 
 bool cp_needsRollback();
 
@@ -37,7 +41,7 @@ bool cp_needsCheckpoint();
 
 android::binder::Status cp_prepareCheckpoint();
 
-android::binder::Status cp_restoreCheckpoint(const std::string& mountPoint);
+android::binder::Status cp_restoreCheckpoint(const std::string& mountPoint, int count = 0);
 
 android::binder::Status cp_markBootAttempt();
 
