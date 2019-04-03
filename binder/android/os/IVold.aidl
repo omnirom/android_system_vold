@@ -109,12 +109,15 @@ interface IVold {
     void startCheckpoint(int retry);
     boolean needsCheckpoint();
     boolean needsRollback();
-    void abortChanges();
+    void abortChanges(in @utf8InCpp String device, boolean retry);
     void commitChanges();
     void prepareCheckpoint();
     void restoreCheckpoint(@utf8InCpp String device);
+    void restoreCheckpointPart(@utf8InCpp String device, int count);
     void markBootAttempt();
     boolean supportsCheckpoint();
+    boolean supportsBlockCheckpoint();
+    boolean supportsFileCheckpoint();
 
     @utf8InCpp String createStubVolume(@utf8InCpp String sourcePath,
             @utf8InCpp String mountPath, @utf8InCpp String fsType,
