@@ -61,12 +61,12 @@
 #include <android-base/unique_fd.h>
 
 using android::base::StringPrintf;
-using android::base::WriteStringToFile;
 using android::fs_mgr::GetEntryForMountPoint;
 using android::vold::kEmptyAuthentication;
 using android::vold::KeyBuffer;
 using android::vold::Keymaster;
 using android::hardware::keymaster::V4_0::KeyFormat;
+using android::vold::writeStringToFile;
 
 namespace {
 
@@ -323,7 +323,7 @@ static bool lookup_key_ref(const std::map<userid_t, std::string>& key_map, useri
                            std::string* raw_ref) {
     auto refi = key_map.find(user_id);
     if (refi == key_map.end()) {
-        LOG(ERROR) << "Cannot find key for " << user_id;
+        LOG(DEBUG) << "Cannot find key for " << user_id;
         return false;
     }
     *raw_ref = refi->second;
@@ -417,18 +417,14 @@ bool fscrypt_initialize_global_de() {
 
     std::string modestring = device_ref.contents_mode + ":" + device_ref.filenames_mode;
     std::string mode_filename = std::string("/data") + fscrypt_key_mode;
-    if (!android::base::WriteStringToFile(modestring, mode_filename)) {
-        PLOG(ERROR) << "Cannot save type";
-        return false;
-    }
+    if (!android::vold::writeStringToFile(modestring, mode_filename)) return false;
 
     std::string ref_filename = std::string("/data") + fscrypt_key_ref;
-    if (!android::base::WriteStringToFile(device_ref.key_raw_ref, ref_filename)) {
-        PLOG(ERROR) << "Cannot save key reference to:" << ref_filename;
-        return false;
-    }
+    if (!android::vold::writeStringToFile(device_ref.key_raw_ref, ref_filename)) return false;
+
     LOG(INFO) << "Wrote system DE key reference to:" << ref_filename;
 
+    if (!android::vold::FsyncDirectory(device_key_dir)) return false;
     s_global_de_initialized = true;
     return true;
 }
@@ -485,7 +481,7 @@ static void drop_caches() {
     // Clean any dirty pages (otherwise they won't be dropped).
     sync();
     // Drop inode and page caches.
-    if (!WriteStringToFile("3", "/proc/sys/vm/drop_caches")) {
+    if (!writeStringToFile("3", "/proc/sys/vm/drop_caches")) {
         PLOG(ERROR) << "Failed to drop caches during key eviction";
     }
 }

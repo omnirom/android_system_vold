@@ -261,8 +261,9 @@ bool cp_needsCheckpoint() {
 }
 
 namespace {
-const std::string kSleepTimeProp = "ro.sys.cp_usleeptime";
-const uint32_t usleeptime_default = 1000;  // 1 s
+const std::string kSleepTimeProp = "ro.sys.cp_msleeptime";
+const uint32_t msleeptime_default = 1000;  // 1 s
+const uint32_t max_msleeptime = 3600000;   // 1 h
 
 const std::string kMinFreeBytesProp = "ro.sys.cp_min_free_bytes";
 const uint64_t min_free_bytes_default = 100 * (1 << 20);  // 100 MiB
@@ -273,10 +274,15 @@ const bool commit_on_full_default = true;
 static void cp_healthDaemon(std::string mnt_pnt, std::string blk_device, bool is_fs_cp) {
     struct statvfs data;
     uint64_t free_bytes = 0;
-    uint32_t usleeptime = GetUintProperty(kSleepTimeProp, usleeptime_default, (uint32_t)-1);
-    uint64_t min_free_bytes = GetUintProperty(kSleepTimeProp, min_free_bytes_default, (uint64_t)-1);
+    uint32_t msleeptime = GetUintProperty(kSleepTimeProp, msleeptime_default, max_msleeptime);
+    uint64_t min_free_bytes =
+        GetUintProperty(kMinFreeBytesProp, min_free_bytes_default, (uint64_t)-1);
     bool commit_on_full = GetBoolProperty(kCommitOnFullProp, commit_on_full_default);
 
+    struct timespec req;
+    req.tv_sec = msleeptime / 1000;
+    msleeptime %= 1000;
+    req.tv_nsec = msleeptime * 1000000;
     while (isCheckpointing) {
         if (is_fs_cp) {
             statvfs(mnt_pnt.c_str(), &data);
@@ -285,7 +291,7 @@ static void cp_healthDaemon(std::string mnt_pnt, std::string blk_device, bool is
             int ret;
             std::string size_filename = std::string("/sys/") + blk_device.substr(5) + "/bow/free";
             std::string content;
-            ret = android::base::ReadFileToString(kMetadataCPFile, &content);
+            ret = android::base::ReadFileToString(size_filename, &content);
             if (ret) {
                 free_bytes = std::strtoul(content.c_str(), NULL, 10);
             }
@@ -301,7 +307,7 @@ static void cp_healthDaemon(std::string mnt_pnt, std::string blk_device, bool is
                 break;
             }
         }
-        usleep(usleeptime);
+        nanosleep(&req, NULL);
     }
 }
 
@@ -324,7 +330,7 @@ Status cp_prepareCheckpoint() {
         if (fstab_rec->fs_mgr_flags.checkpoint_blk) {
             android::base::unique_fd fd(
                 TEMP_FAILURE_RETRY(open(mount_rec.mount_point.c_str(), O_RDONLY | O_CLOEXEC)));
-            if (!fd) {
+            if (fd == -1) {
                 PLOG(ERROR) << "Failed to open mount point" << mount_rec.mount_point;
                 continue;
             }
@@ -340,7 +346,7 @@ Status cp_prepareCheckpoint() {
         }
         if (fstab_rec->fs_mgr_flags.checkpoint_blk || fstab_rec->fs_mgr_flags.checkpoint_fs) {
             std::thread(cp_healthDaemon, std::string(mount_rec.mount_point),
-                        std::string(mount_rec.mount_point),
+                        std::string(mount_rec.blk_device),
                         fstab_rec->fs_mgr_flags.checkpoint_fs == 1)
                 .detach();
         }
@@ -569,7 +575,7 @@ Status cp_restoreCheckpoint(const std::string& blockDevice, int restore_limit) {
         Status status = Status::ok();
 
         LOG(INFO) << action << " checkpoint on " << blockDevice;
-        base::unique_fd device_fd(open(blockDevice.c_str(), O_RDWR));
+        base::unique_fd device_fd(open(blockDevice.c_str(), O_RDWR | O_CLOEXEC));
         if (device_fd < 0) {
             PLOG(ERROR) << "Cannot open " << blockDevice;
             return Status::fromExceptionCode(errno, ("Cannot open " + blockDevice).c_str());
