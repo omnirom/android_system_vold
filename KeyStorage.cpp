@@ -19,9 +19,7 @@
 #include "Keymaster.h"
 #include "ScryptParameters.h"
 #include "Utils.h"
-#include "Checkpoint.h"
 
-#include <thread>
 #include <vector>
 
 #include <errno.h>
@@ -38,7 +36,6 @@
 #include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/unique_fd.h>
-#include <android-base/properties.h>
 
 #include <cutils/properties.h>
 
@@ -234,28 +231,6 @@ bool readSecdiscardable(const std::string& filename, std::string* hash) {
     return true;
 }
 
-static void deferedKmDeleteKey(const std::string& kmkey) {
-    while (!android::base::WaitForProperty("vold.checkpoint_committed", "1")) {
-        LOG(ERROR) << "Wait for boot timed out";
-    }
-    Keymaster keymaster;
-    if (!keymaster || !keymaster.deleteKey(kmkey)) {
-        LOG(ERROR) << "Defered Key deletion failed during upgrade";
-    }
-}
-
-bool kmDeleteKey(Keymaster& keymaster, const std::string& kmKey) {
-    bool needs_cp = cp_needsCheckpoint();
-
-    if (needs_cp) {
-        std::thread(deferedKmDeleteKey, kmKey).detach();
-        LOG(INFO) << "Deferring Key deletion during upgrade";
-        return true;
-    } else {
-        return keymaster.deleteKey(kmKey);
-    }
-}
-
 static KeymasterOperation begin(Keymaster& keymaster, const std::string& dir,
                                 km::KeyPurpose purpose, const km::AuthorizationSet& keyParams,
                                 const km::AuthorizationSet& opParams,
@@ -286,7 +261,7 @@ static KeymasterOperation begin(Keymaster& keymaster, const std::string& dir,
                 LOG(ERROR) << "Key dir sync failed: " << dir;
                 return KeymasterOperation();
             }
-            if (!kmDeleteKey(keymaster, kmKey)) {
+            if (!keymaster.deleteKey(kmKey)) {
                 LOG(ERROR) << "Key deletion failed during upgrade, continuing anyway: " << dir;
             }
         }
