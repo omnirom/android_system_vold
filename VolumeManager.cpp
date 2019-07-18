@@ -222,6 +222,9 @@ void VolumeManager::handleBlockEvent(NetlinkEvent* evt) {
                                                     major >= (int)kMajorBlockExperimentalMin &&
                                                     major <= (int)kMajorBlockExperimentalMax)) {
                         flags |= android::vold::Disk::Flags::kSd;
+                    } else if (eventPath.find("ufs") != std::string::npos) {
+                        flags |= android::vold::Disk::Flags::kSd;
+                        flags |= android::vold::Disk::Flags::kUfsCard;
                     } else {
                         flags |= android::vold::Disk::Flags::kUsb;
                     }
