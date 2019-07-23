@@ -1282,8 +1282,9 @@ static int create_crypto_blk_dev(struct crypt_mnt_ftr* crypt_ftr, const unsigned
     char encrypted_state[PROPERTY_VALUE_MAX] = {0};
     char progress[PROPERTY_VALUE_MAX] = {0};
     const char *extra_params;
-#endif
+#else
     std::vector<std::string> extra_params_vec;
+#endif
 
     if ((fd = open("/dev/device-mapper", O_RDWR | O_CLOEXEC)) < 0) {
         SLOGE("Cannot open device-mapper\n");
@@ -1331,14 +1332,15 @@ static int create_crypto_blk_dev(struct crypt_mnt_ftr* crypt_ftr, const unsigned
           else
             extra_params = "fde_enabled";
       }
-      extra_params_vec.emplace_back(extra_params);
     } else {
+      extra_params = "";
       if (! get_dm_crypt_version(fd, name, version)) {
         /* Support for allow_discards was added in version 1.11.0 */
         if ((version[0] >= 2) || ((version[0] == 1) && (version[1] >= 11))) {
-          extra_params_vec.emplace_back("allow_discards");
           if (flags & CREATE_CRYPTO_BLK_DEV_FLAGS_ALLOW_ENCRYPT_OVERRIDE)
-            extra_params_vec.emplace_back("allow_encrypt_override");
+            extra_params = "2 allow_discards allow_encrypt_override";
+          else
+            extra_params = "1 allow_discards";
           SLOGI("Enabling support for allow_discards in dmcrypt.\n");
         }
       }
