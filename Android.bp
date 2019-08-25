@@ -31,6 +31,7 @@ cc_defaults {
         "libavb",
         "libbootloader_message",
         "libdm",
+        "libext2_uuid",
         "libfec",
         "libfec_rs",
         "libfs_avb",
@@ -241,6 +242,7 @@ cc_binary {
         "libhidlbase",
         "libhwbinder",
         "libkeymaster4support",
+        "libutils",
     ],
 }
 
@@ -279,6 +281,5 @@ filegroup {
         "binder/android/os/IVoldListener.aidl",
         "binder/android/os/IVoldTaskListener.aidl",
     ],
+    path: "binder",
 }
-
-subdirs = ["tests"]
