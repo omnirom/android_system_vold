@@ -111,16 +111,16 @@ status_t PrivateVolume::doCreate() {
 
     int fd = 0;
     int retries = RETRY_MOUNT_ATTEMPTS;
-    while ((fd = open(crypto_blkdev, O_WRONLY|O_CLOEXEC)) < 0) {
+    while ((fd = open(mDmDevPath.c_str(), O_WRONLY|O_CLOEXEC)) < 0) {
         if (retries > 0) {
             retries--;
-            PLOG(ERROR) << "Error opening crypto_blkdev " << crypto_blkdev
+            PLOG(ERROR) << "Error opening crypto_blkdev " << mDmDevPath.c_str()
                             << " for private volume. err=" << errno
                             << "(" << strerror(errno) << "), retrying for the "
                             << RETRY_MOUNT_ATTEMPTS - retries << " time";
             sleep(RETRY_MOUNT_DELAY_SECONDS);
         } else {
-            PLOG(ERROR) << "Error opening crypto_blkdev " << crypto_blkdev
+            PLOG(ERROR) << "Error opening crypto_blkdev " << mDmDevPath.c_str()
                             << " for private volume. err=" << errno
                             << "(" << strerror(errno) << "), retried "
                             << RETRY_MOUNT_ATTEMPTS << " times";
