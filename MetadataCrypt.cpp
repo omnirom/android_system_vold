@@ -242,7 +242,8 @@ int fscrypt_setup_ufscard_volume (const std::string& dm_name, const std::string&
     memcpy(reinterpret_cast<void*>(key_buf.data()), key.c_str(), key.size());
     uint64_t nr_sec;
     if (!get_number_of_sectors(real_blkdev, &nr_sec)) return -1;
-    if (!create_crypto_blk_dev(dm_name, nr_sec, real_blkdev, key_buf, &crypto_blkdev))
+    if (!create_crypto_blk_dev(dm_name, nr_sec, real_blkdev, key_buf, &crypto_blkdev,
+                               android::base::GetBoolProperty("ro.crypto.set_dun", false)))
         return -1;
 
     return 0;
