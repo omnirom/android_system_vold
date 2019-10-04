@@ -144,9 +144,15 @@ Status cp_startCheckpoint(int retry) {
 namespace {
 
 volatile bool isCheckpointing = false;
+
+// Protects isCheckpointing and code that makes decisions based on status of
+// isCheckpointing
+std::mutex isCheckpointingLock;
 }
 
 Status cp_commitChanges() {
+    std::lock_guard<std::mutex> lock(isCheckpointingLock);
+
     if (!isCheckpointing) {
         return Status::ok();
     }
@@ -257,10 +263,16 @@ bool cp_needsRollback() {
 }
 
 bool cp_needsCheckpoint() {
+    // Make sure we only return true during boot. See b/138952436 for discussion
+    static bool called_once = false;
+    if (called_once) return isCheckpointing;
+    called_once = true;
+
     bool ret;
     std::string content;
     sp<IBootControl> module = IBootControl::getService();
 
+    std::lock_guard<std::mutex> lock(isCheckpointingLock);
     if (isCheckpointing) return isCheckpointing;
 
     if (module && module->isSlotMarkedSuccessful(module->getCurrentSlot()) == BoolResult::FALSE) {
@@ -330,6 +342,7 @@ static void cp_healthDaemon(std::string mnt_pnt, std::string blk_device, bool is
 }  // namespace
 
 Status cp_prepareCheckpoint() {
+    std::lock_guard<std::mutex> lock(isCheckpointingLock);
     if (!isCheckpointing) {
         return Status::ok();
     }

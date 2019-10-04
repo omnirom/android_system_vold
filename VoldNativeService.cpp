@@ -326,7 +326,8 @@ binder::Status VoldNativeService::forgetPartition(const std::string& partGuid,
 }
 
 binder::Status VoldNativeService::mount(const std::string& volId, int32_t mountFlags,
-                                        int32_t mountUserId) {
+                                        int32_t mountUserId,
+                                        android::base::unique_fd* _aidl_return) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_ID(volId);
     ACQUIRE_LOCK;
@@ -343,6 +344,14 @@ binder::Status VoldNativeService::mount(const std::string& volId, int32_t mountF
     if (res != OK) {
         return translate(res);
     }
+
+    _aidl_return->reset(dup(vol->getFuseFd().get()));
+    if (_aidl_return->get() == -1) {
+        // Let's not return invalid fd since binder will not allow null fds. Instead give it a
+        // default value.
+        _aidl_return->reset(open("/dev/null", O_RDONLY | O_CLOEXEC));
+    }
+
     if ((mountFlags & MOUNT_FLAG_PRIMARY) != 0) {
         res = VolumeManager::Instance()->setPrimary(vol);
         if (res != OK) {
@@ -692,7 +701,7 @@ binder::Status VoldNativeService::fbeEnable() {
     ENFORCE_UID(AID_SYSTEM);
     ACQUIRE_CRYPT_LOCK;
 
-    return translateBool(fscrypt_initialize_global_de());
+    return translateBool(fscrypt_initialize_systemwide_keys());
 }
 
 binder::Status VoldNativeService::mountDefaultEncrypted() {
