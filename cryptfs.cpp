@@ -71,6 +71,8 @@
 #include <unistd.h>
 
 #ifdef CONFIG_HW_DISK_ENCRYPTION
+#include <linux/dm-ioctl.h>
+#include <sys/ioctl.h>
 #include <cryptfs_hw.h>
 #endif
 extern "C" {
@@ -1139,6 +1141,171 @@ static int add_sector_size_param(DmTargetCrypt* target, struct crypt_mnt_ftr* ft
     return 0;
 }
 
+#if defined(CONFIG_HW_DISK_ENCRYPTION) && !defined(CONFIG_HW_DISK_ENCRYPT_PERF)
+#define DM_CRYPT_BUF_SIZE 4096
+
+static void ioctl_init(struct dm_ioctl* io, size_t dataSize, const char* name, unsigned flags) {
+    memset(io, 0, dataSize);
+    io->data_size = dataSize;
+    io->data_start = sizeof(struct dm_ioctl);
+    io->version[0] = 4;
+    io->version[1] = 0;
+    io->version[2] = 0;
+    io->flags = flags;
+    if (name) {
+        strlcpy(io->name, name, sizeof(io->name));
+    }
+}
+
+static int load_crypto_mapping_table(struct crypt_mnt_ftr* crypt_ftr,
+                                     const unsigned char* master_key, const char* real_blk_name,
+                                     const char* name, int fd, const char* extra_params) {
+    alignas(struct dm_ioctl) char buffer[DM_CRYPT_BUF_SIZE];
+    struct dm_ioctl* io;
+    struct dm_target_spec* tgt;
+    char* crypt_params;
+    // We need two ASCII characters to represent each byte, and need space for
+    // the '\0' terminator.
+    char master_key_ascii[MAX_KEY_LEN * 2 + 1];
+    size_t buff_offset;
+    int i;
+
+    io = (struct dm_ioctl*)buffer;
+
+    /* Load the mapping table for this device */
+    tgt = (struct dm_target_spec*)&buffer[sizeof(struct dm_ioctl)];
+
+    ioctl_init(io, DM_CRYPT_BUF_SIZE, name, 0);
+    io->target_count = 1;
+    tgt->status = 0;
+    tgt->sector_start = 0;
+    tgt->length = crypt_ftr->fs_size;
+    crypt_params = buffer + sizeof(struct dm_ioctl) + sizeof(struct dm_target_spec);
+    buff_offset = crypt_params - buffer;
+    SLOGI(
+        "Creating crypto dev \"%s\"; cipher=%s, keysize=%u, real_dev=%s, len=%llu, params=\"%s\"\n",
+        name, crypt_ftr->crypto_type_name, crypt_ftr->keysize, real_blk_name, tgt->length * 512,
+        extra_params);
+    if(is_hw_disk_encryption((char*)crypt_ftr->crypto_type_name)) {
+        strlcpy(tgt->target_type, "req-crypt",DM_MAX_TYPE_NAME);
+        if (is_ice_enabled())
+            convert_key_to_hex_ascii(master_key, sizeof(int), master_key_ascii);
+        else
+            convert_key_to_hex_ascii(master_key, crypt_ftr->keysize, master_key_ascii);
+    }
+    snprintf(crypt_params, sizeof(buffer) - buff_offset, "%s %s 0 %s 0 %s 0",
+             crypt_ftr->crypto_type_name, master_key_ascii,
+             real_blk_name, extra_params);
+
+    SLOGI("target_type = %s", tgt->target_type);
+    SLOGI("real_blk_name = %s, extra_params = %s", real_blk_name, extra_params);
+
+    crypt_params += strlen(crypt_params) + 1;
+    crypt_params =
+        (char*)(((unsigned long)crypt_params + 7) & ~8); /* Align to an 8 byte boundary */
+    tgt->next = crypt_params - buffer;
+
+    for (i = 0; i < TABLE_LOAD_RETRIES; i++) {
+        if (!ioctl(fd, DM_TABLE_LOAD, io)) {
+            break;
+        }
+        usleep(500000);
+    }
+
+    if (i == TABLE_LOAD_RETRIES) {
+        /* We failed to load the table, return an error */
+        return -1;
+    } else {
+        return i + 1;
+    }
+}
+
+static int create_crypto_blk_dev_hw(struct crypt_mnt_ftr* crypt_ftr, const unsigned char* master_key,
+                                 const char* real_blk_name, char* crypto_blk_name, const char* name,
+                                 uint32_t flags) {
+    char buffer[DM_CRYPT_BUF_SIZE];
+    struct dm_ioctl* io;
+    unsigned int minor;
+    int fd = 0;
+    int err;
+    int retval = -1;
+    int version[3];
+    int load_count;
+    char encrypted_state[PROPERTY_VALUE_MAX] = {0};
+    char progress[PROPERTY_VALUE_MAX] = {0};
+    const char *extra_params;
+
+    if ((fd = open("/dev/device-mapper", O_RDWR | O_CLOEXEC)) < 0) {
+        SLOGE("Cannot open device-mapper\n");
+        goto errout;
+    }
+
+    io = (struct dm_ioctl*)buffer;
+
+    ioctl_init(io, DM_CRYPT_BUF_SIZE, name, 0);
+    err = ioctl(fd, DM_DEV_CREATE, io);
+    if (err) {
+        SLOGE("Cannot create dm-crypt device %s: %s\n", name, strerror(errno));
+        goto errout;
+    }
+
+    /* Get the device status, in particular, the name of it's device file */
+    ioctl_init(io, DM_CRYPT_BUF_SIZE, name, 0);
+    if (ioctl(fd, DM_DEV_STATUS, io)) {
+        SLOGE("Cannot retrieve dm-crypt device status\n");
+        goto errout;
+    }
+    minor = (io->dev & 0xff) | ((io->dev >> 12) & 0xfff00);
+    snprintf(crypto_blk_name, MAXPATHLEN, "/dev/block/dm-%u", minor);
+
+    if(is_hw_disk_encryption((char*)crypt_ftr->crypto_type_name)) {
+      /* Set fde_enabled if either FDE completed or in-progress */
+      property_get("ro.crypto.state", encrypted_state, ""); /* FDE completed */
+      property_get("vold.encrypt_progress", progress, ""); /* FDE in progress */
+      if (!strcmp(encrypted_state, "encrypted") || strcmp(progress, "")) {
+        if (is_ice_enabled()) {
+          extra_params = "fde_enabled ice allow_encrypt_override";
+        } else {
+          extra_params = "fde_enabled allow_encrypt_override";
+        }
+      } else {
+          extra_params = "fde_enabled allow_encrypt_override";
+      }
+      load_count = load_crypto_mapping_table(crypt_ftr, master_key, real_blk_name, name, fd,
+                                           extra_params);
+    }
+    
+    if (load_count < 0) {
+        SLOGE("Cannot load dm-crypt mapping table.\n");
+        goto errout;
+    } else if (load_count > 1) {
+        SLOGI("Took %d tries to load dmcrypt table.\n", load_count);
+    }
+
+    /* Resume this device to activate it */
+    ioctl_init(io, DM_CRYPT_BUF_SIZE, name, 0);
+
+    if (ioctl(fd, DM_DEV_SUSPEND, io)) {
+        SLOGE("Cannot resume the dm-crypt device\n");
+        goto errout;
+    }
+
+    /* Ensure the dm device has been created before returning. */
+    if (android::vold::WaitForFile(crypto_blk_name, 1s) < 0) {
+        // WaitForFile generates a suitable log message
+        goto errout;
+    }
+
+    /* We made it here with no errors.  Woot! */
+    retval = 0;
+
+errout:
+    close(fd); /* If fd is <0 from a failed open call, it's safe to just ignore the close error */
+
+    return retval;
+}
+#endif
+
 static int create_crypto_blk_dev(struct crypt_mnt_ftr* crypt_ftr, const unsigned char* master_key,
                                  const char* real_blk_name, char* crypto_blk_name, const char* name,
                                  uint32_t flags) {
@@ -1823,7 +1990,7 @@ static int test_mount_hw_encrypted_fs(struct crypt_mnt_ftr* crypt_ftr,
         else {
             if (is_ice_enabled()) {
 #ifndef CONFIG_HW_DISK_ENCRYPT_PERF
-                if (create_crypto_blk_dev(crypt_ftr, (unsigned char*)&key_index,
+                if (create_crypto_blk_dev_hw(crypt_ftr, (unsigned char*)&key_index,
                                           real_blkdev.c_str(), crypto_blkdev, label, 0)) {
                     SLOGE("Error creating decrypted block device");
                     rc = -1;
@@ -2607,7 +2774,7 @@ int cryptfs_enable_internal(int crypt_type, const char* passwd, int no_ui) {
 #ifdef CONFIG_HW_DISK_ENCRYPT_PERF
       strlcpy(crypto_blkdev, real_blkdev.c_str(), sizeof(crypto_blkdev));
 #else
-      create_crypto_blk_dev(&crypt_ftr, (unsigned char*)&key_index, real_blkdev.c_str(), crypto_blkdev,
+      create_crypto_blk_dev_hw(&crypt_ftr, (unsigned char*)&key_index, real_blkdev.c_str(), crypto_blkdev,
                           CRYPTO_BLOCK_DEVICE, 0);
 #endif
     else
