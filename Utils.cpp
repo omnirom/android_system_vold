@@ -165,7 +165,7 @@ status_t ForceUnmount(const std::string& path) {
     if (!umount2(cpath, UMOUNT_NOFOLLOW) || errno == EINVAL || errno == ENOENT) {
         return OK;
     }
-
+    PLOG(INFO) << "ForceUnmount failed";
     return -errno;
 }
 
@@ -983,6 +983,52 @@ bool writeStringToFile(const std::string& payload, const std::string& filename) 
         }
     }
     return true;
+}
+
+int MountUserFuse(userid_t user_id, const std::string& relative_path,
+                  android::base::unique_fd* fuse_fd) {
+    std::string path(StringPrintf("/mnt/user/%d/%s", user_id, relative_path.c_str()));
+
+    // Force remove the existing mount before we attempt to prepare the
+    // directory. If we have a dangling mount, then PrepareDir may fail if the
+    // indirection to FUSE doesn't work.
+    android::status_t result = android::vold::ForceUnmount(path);
+    if (result != android::OK) {
+        PLOG(ERROR) << "Failed to unmount " << path;
+        return -1;
+    }
+
+    // Create directories.
+    result = android::vold::PrepareDir(path, 0700, AID_ROOT, AID_ROOT);
+    if (result != android::OK) {
+        PLOG(ERROR) << "Failed to prepare directory " << path;
+        return -1;
+    }
+
+    // Open fuse fd.
+    fuse_fd->reset(open("/dev/fuse", O_RDWR | O_CLOEXEC));
+    if (fuse_fd->get() == -1) {
+        PLOG(ERROR) << "Failed to open /dev/fuse";
+        return -1;
+    }
+
+    // Note: leaving out default_permissions since we don't want kernel to do lower filesystem
+    // permission checks before routing to FUSE daemon.
+    const auto opts = StringPrintf(
+        "fd=%i,"
+        "rootmode=40000,"
+        "allow_other,"
+        "user_id=0,group_id=0,",
+        fuse_fd->get());
+
+    const int result_int =
+        TEMP_FAILURE_RETRY(mount("/dev/fuse", path.c_str(), "fuse",
+                                 MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME, opts.c_str()));
+    if (result_int != 0) {
+        PLOG(ERROR) << "Failed to mount " << path;
+        return -errno;
+    }
+    return 0;
 }
 
 }  // namespace vold

@@ -127,7 +127,13 @@ static bool generateKeymasterKey(Keymaster& keymaster, const KeyAuthentication& 
         paramBuilder.Authorization(km::TAG_USER_AUTH_TYPE, km::HardwareAuthenticatorType::PASSWORD);
         paramBuilder.Authorization(km::TAG_AUTH_TIMEOUT, AUTH_TIMEOUT);
     }
-    return keymaster.generateKey(paramBuilder, key);
+
+    auto paramsWithRollback = paramBuilder;
+    paramsWithRollback.Authorization(km::TAG_ROLLBACK_RESISTANCE);
+
+    // Generate rollback-resistant key if possible.
+    return keymaster.generateKey(paramsWithRollback, key) ||
+           keymaster.generateKey(paramBuilder, key);
 }
 
 bool generateWrappedKey(userid_t user_id, KeyType key_type,
