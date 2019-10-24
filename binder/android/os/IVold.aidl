@@ -117,6 +117,7 @@ interface IVold {
     boolean supportsCheckpoint();
     boolean supportsBlockCheckpoint();
     boolean supportsFileCheckpoint();
+    void resetCheckpoint();
 
     @utf8InCpp String createStubVolume(@utf8InCpp String sourcePath,
             @utf8InCpp String mountPath, @utf8InCpp String fsType,
@@ -158,6 +159,7 @@ interface IVold {
     const int REMOUNT_MODE_LEGACY = 4;
     const int REMOUNT_MODE_INSTALLER = 5;
     const int REMOUNT_MODE_FULL = 6;
+    const int REMOUNT_MODE_PASS_THROUGH = 7;
 
     const int VOLUME_STATE_UNMOUNTED = 0;
     const int VOLUME_STATE_CHECKING = 1;
