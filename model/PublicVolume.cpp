@@ -169,18 +169,23 @@ status_t PublicVolume::doMount() {
 
     dev_t before = GetDevice(mFuseFull);
 
-    bool isFuse = base::GetBoolProperty(kPropFuse, false);
+    bool isFuse = base::GetBoolProperty(kPropFuseSnapshot, false);
 
     if (isFuse) {
         LOG(INFO) << "Mounting public fuse volume";
         android::base::unique_fd fd;
-        int result = MountUserFuse(getMountUserId(), stableName, &fd);
+        int user_id = getMountUserId();
+        int result = MountUserFuse(user_id, stableName, &fd);
+
         if (result != 0) {
             LOG(ERROR) << "Failed to mount public fuse volume";
             return -result;
         }
         setFuseFd(std::move(fd));
-        return OK;
+
+        std::string pass_through_path(StringPrintf("/mnt/pass_through/%d/%s",
+                                                 user_id, stableName.c_str()));
+        return BindMount(getInternalPath(), pass_through_path);
     }
 
     if (!(mFusePid = fork())) {
@@ -245,7 +250,7 @@ status_t PublicVolume::doUnmount() {
     // error code and might cause broken behaviour in applications.
     KillProcessesUsingPath(getPath());
 
-    bool isFuse = base::GetBoolProperty(kPropFuse, false);
+    bool isFuse = base::GetBoolProperty(kPropFuseSnapshot, false);
     if (isFuse) {
         // Use UUID as stable name, if available
         std::string stableName = getId();
