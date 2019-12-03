@@ -28,6 +28,7 @@ cc_defaults {
     name: "vold_default_libs",
 
     static_libs: [
+        "libasync_safe",
         "libavb",
         "libbootloader_message",
         "libdm",
@@ -276,6 +277,7 @@ filegroup {
     srcs: [
         "binder/android/os/IVold.aidl",
         "binder/android/os/IVoldListener.aidl",
+        "binder/android/os/IVoldMountCallback.aidl",
         "binder/android/os/IVoldTaskListener.aidl",
     ],
     path: "binder",
