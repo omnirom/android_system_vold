@@ -56,6 +56,7 @@ EmulatedVolume::EmulatedVolume(const std::string& rawPath, dev_t device, const s
     setId(StringPrintf("emulated:%u,%u;%u", major(device), minor(device), userId));
     mRawPath = rawPath;
     mLabel = fsUuid;
+    mFuseMounted = false;
 }
 
 EmulatedVolume::~EmulatedVolume() {}
@@ -74,7 +75,7 @@ static status_t mountFuseBindMounts(int userId, const std::string& label) {
     // TODO(b/134706060) we don't actually want to mount the "write" view by
     // default, since it gives write access to all OBB dirs.
     std::string androidSource(
-            StringPrintf("/mnt/runtime/write/%s/%d/Android", label.c_str(), userId));
+            StringPrintf("/mnt/runtime/default/%s/%d/Android", label.c_str(), userId));
     std::string androidTarget(
             StringPrintf("/mnt/user/%d/%s/%d/Android", userId, label.c_str(), userId));
 
@@ -132,7 +133,7 @@ status_t EmulatedVolume::doMount() {
 
     dev_t before = GetDevice(mSdcardFsFull);
 
-    bool isFuse = base::GetBoolProperty(kPropFuseSnapshot, false);
+    bool isFuse = base::GetBoolProperty(kPropFuse, false);
 
     // Mount sdcardfs regardless of FUSE, since we need it to bind-mount on top of the
     // FUSE volume for various reasons.
