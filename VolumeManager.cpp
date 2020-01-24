@@ -81,6 +81,7 @@ using android::vold::BindMount;
 using android::vold::CreateDir;
 using android::vold::DeleteDirContents;
 using android::vold::DeleteDirContentsAndDir;
+using android::vold::PrepareDirsFromRoot;
 using android::vold::PrivateVolume;
 using android::vold::Symlink;
 using android::vold::Unlink;
@@ -266,9 +267,16 @@ void VolumeManager::handleBlockEvent(NetlinkEvent* evt) {
 void VolumeManager::handleDiskAdded(const std::shared_ptr<android::vold::Disk>& disk) {
     // For security reasons, if secure keyguard is showing, wait
     // until the user unlocks the device to actually touch it
+    // Additionally, wait until user 0 is actually started, since we need
+    // the user to be up before we can mount a FUSE daemon to handle the disk.
+    bool userZeroStarted = mStartedUsers.find(0) != mStartedUsers.end();
     if (mSecureKeyguardShowing) {
         LOG(INFO) << "Found disk at " << disk->getEventPath()
                   << " but delaying scan due to secure keyguard";
+        mPendingDisks.push_back(disk);
+    } else if (!userZeroStarted) {
+        LOG(INFO) << "Found disk at " << disk->getEventPath()
+                  << " but delaying scan due to user zero not having started";
         mPendingDisks.push_back(disk);
     } else {
         disk->create();
@@ -484,6 +492,8 @@ int VolumeManager::onUserStarted(userid_t userId) {
     }
 
     mStartedUsers.insert(userId);
+
+    createPendingDisksIfNeeded();
     return 0;
 }
 
@@ -498,17 +508,22 @@ int VolumeManager::onUserStopped(userid_t userId) {
     return 0;
 }
 
-int VolumeManager::onSecureKeyguardStateChanged(bool isShowing) {
-    mSecureKeyguardShowing = isShowing;
-    if (!mSecureKeyguardShowing) {
-        // Now that secure keyguard has been dismissed, process
-        // any pending disks
+void VolumeManager::createPendingDisksIfNeeded() {
+    bool userZeroStarted = mStartedUsers.find(0) != mStartedUsers.end();
+    if (!mSecureKeyguardShowing && userZeroStarted) {
+        // Now that secure keyguard has been dismissed and user 0 has
+        // started, process any pending disks
         for (const auto& disk : mPendingDisks) {
             disk->create();
             mDisks.push_back(disk);
         }
         mPendingDisks.clear();
     }
+}
+
+int VolumeManager::onSecureKeyguardStateChanged(bool isShowing) {
+    mSecureKeyguardShowing = isShowing;
+    createPendingDisksIfNeeded();
     return 0;
 }
 
@@ -794,7 +809,8 @@ int VolumeManager::unmountAll() {
 #ifdef __ANDROID_DEBUGGABLE__
              !StartsWith(test, "/mnt/scratch") &&
 #endif
-             !StartsWith(test, "/mnt/vendor") && !StartsWith(test, "/mnt/product")) ||
+             !StartsWith(test, "/mnt/vendor") && !StartsWith(test, "/mnt/product") &&
+             !StartsWith(test, "/mnt/installer")) ||
             StartsWith(test, "/storage/")) {
             toUnmount.push_front(test);
         }
@@ -809,16 +825,29 @@ int VolumeManager::unmountAll() {
     return 0;
 }
 
-int VolumeManager::mkdirs(const std::string& path) {
+int VolumeManager::setupAppDir(const std::string& path, const std::string& appDirRoot,
+                               int32_t appUid) {
     // Only offer to create directories for paths managed by vold
-    if (StartsWith(path, "/storage/")) {
-        std::string lower_path = "/mnt/runtime/default/" + path.substr(9);
-        // fs_mkdirs() does symlink checking and relative path enforcement
-        return fs_mkdirs(lower_path.c_str(), 0700);
-    } else {
+    if (!StartsWith(path, "/storage/")) {
         LOG(ERROR) << "Failed to find mounted volume for " << path;
         return -EINVAL;
     }
+
+    // Convert paths to lower filesystem paths to avoid making FUSE requests for these reasons:
+    // 1. A FUSE request from vold puts vold at risk of hanging if the FUSE daemon is down
+    // 2. The FUSE daemon prevents requests on /mnt/user/0/emulated/<userid != 0> and a request
+    // on /storage/emulated/10 means /mnt/user/0/emulated/10
+    // TODO(b/146419093): Use lower filesystem paths that don't depend on sdcardfs
+    const std::string lowerPath = "/mnt/runtime/default/" + path.substr(9);
+    const std::string lowerAppDirRoot = "/mnt/runtime/default/" + appDirRoot.substr(9);
+
+    // First create the root which holds app dirs, if needed.
+    int ret = PrepareDirsFromRoot(lowerAppDirRoot, "/mnt/runtime/default/", 0771, AID_MEDIA_RW, AID_MEDIA_RW);
+    if (ret != 0) {
+        return ret;
+    }
+    // Then, create app-specific dirs with the correct UID/GID
+    return PrepareDirsFromRoot(lowerPath, lowerAppDirRoot, 0770, appUid, AID_MEDIA_RW);
 }
 
 int VolumeManager::createObb(const std::string& sourcePath, const std::string& sourceKey,

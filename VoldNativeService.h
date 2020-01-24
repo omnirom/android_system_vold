@@ -65,7 +65,8 @@ class VoldNativeService : public BinderService<VoldNativeService>, public os::Bn
 
     binder::Status remountUid(int32_t uid, int32_t remountMode);
 
-    binder::Status mkdirs(const std::string& path);
+    binder::Status setupAppDir(const std::string& path, const std::string& appDirRoot,
+                               int32_t appUid);
 
     binder::Status createObb(const std::string& sourcePath, const std::string& sourceKey,
                              int32_t ownerGid, std::string* _aidl_return);
@@ -115,8 +116,8 @@ class VoldNativeService : public BinderService<VoldNativeService>, public os::Bn
 
     binder::Status addUserKeyAuth(int32_t userId, int32_t userSerial, const std::string& token,
                                   const std::string& secret);
-    binder::Status clearUserKeyAuth(int32_t userId, int32_t userSerial,
-            const std::string& token, const std::string& secret);
+    binder::Status clearUserKeyAuth(int32_t userId, int32_t userSerial, const std::string& token,
+                                    const std::string& secret);
     binder::Status fixateNewestUserKeyAuth(int32_t userId);
 
     binder::Status unlockUserKey(int32_t userId, int32_t userSerial, const std::string& token,

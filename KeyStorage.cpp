@@ -43,8 +43,8 @@
 #include <cutils/properties.h>
 
 #include <hardware/hw_auth_token.h>
-#include <keymasterV4_0/authorization_set.h>
-#include <keymasterV4_0/keymaster_utils.h>
+#include <keymasterV4_1/authorization_set.h>
+#include <keymasterV4_1/keymaster_utils.h>
 
 extern "C" {
 
@@ -147,16 +147,19 @@ bool generateWrappedKey(userid_t user_id, KeyType key_type,
                                .GcmModeMinMacLen(GCM_MAC_BYTES * 8)
                                .Authorization(km::TAG_USER_ID, user_id);
     km::KeyParameter param1;
-    param1.tag = (km::Tag) (android::hardware::keymaster::V4_0::KM_TAG_FBE_ICE);
+    param1.tag = static_cast<::android::hardware::keymaster::V4_0::Tag>(
+        ::android::hardware::keymaster::V4_0::KM_TAG_FBE_ICE);
     param1.f.boolValue = true;
     paramBuilder.push_back(param1);
 
     km::KeyParameter param2;
     if ((key_type == KeyType::DE_USER) || (key_type == KeyType::DE_SYS) || (key_type == KeyType::ME)) {
-        param2.tag = (km::Tag) (android::hardware::keymaster::V4_0::KM_TAG_KEY_TYPE);
+        param2.tag = static_cast<::android::hardware::keymaster::V4_0::Tag>(
+            ::android::hardware::keymaster::V4_0::KM_TAG_KEY_TYPE);
         param2.f.integer = 0;
     } else if (key_type == KeyType::CE_USER) {
-        param2.tag = (km::Tag) (android::hardware::keymaster::V4_0::KM_TAG_KEY_TYPE);
+        param2.tag = static_cast<::android::hardware::keymaster::V4_0::Tag>(
+            ::android::hardware::keymaster::V4_0::KM_TAG_KEY_TYPE);
         param2.f.integer = 1;
     }
     paramBuilder.push_back(param2);
