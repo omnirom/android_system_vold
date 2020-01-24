@@ -21,7 +21,7 @@
 #include <string>
 
 #include <fcntl.h>
-#include <linux/fs.h>
+#include <linux/fscrypt.h>
 #include <openssl/sha.h>
 #include <sys/ioctl.h>
 
@@ -32,7 +32,6 @@
 #include "FsCrypt.h"
 #include "KeyStorage.h"
 #include "Utils.h"
-#include "fscrypt_uapi.h"
 
 #define MAX_USER_ID 0xFFFFFFFF
 
@@ -41,10 +40,8 @@ using android::vold::KeyType;
 namespace android {
 namespace vold {
 
-constexpr int FS_AES_256_XTS_KEY_SIZE = 64;
-
 bool randomKey(KeyBuffer* key) {
-    *key = KeyBuffer(FS_AES_256_XTS_KEY_SIZE);
+    *key = KeyBuffer(FSCRYPT_MAX_KEY_SIZE);
     if (ReadRandomBytes(key->size(), key->data()) != 0) {
         // TODO status_t plays badly with PLOG, fix it.
         LOG(ERROR) << "Random read failed";
@@ -103,20 +100,20 @@ static std::string generateKeyRef(const uint8_t* key, int length) {
     unsigned char key_ref2[SHA512_DIGEST_LENGTH];
     SHA512_Final(key_ref2, &c);
 
-    static_assert(FS_KEY_DESCRIPTOR_SIZE <= SHA512_DIGEST_LENGTH, "Hash too short for descriptor");
-    return std::string((char*)key_ref2, FS_KEY_DESCRIPTOR_SIZE);
+    static_assert(FSCRYPT_KEY_DESCRIPTOR_SIZE <= SHA512_DIGEST_LENGTH,
+                  "Hash too short for descriptor");
+    return std::string((char*)key_ref2, FSCRYPT_KEY_DESCRIPTOR_SIZE);
 }
 
 static bool fillKey(const KeyBuffer& key, fscrypt_key* fs_key) {
-    if (key.size() != FS_AES_256_XTS_KEY_SIZE) {
+    if (key.size() != FSCRYPT_MAX_KEY_SIZE) {
         LOG(ERROR) << "Wrong size key " << key.size();
         return false;
     }
-    static_assert(FS_AES_256_XTS_KEY_SIZE <= sizeof(fs_key->raw), "Key too long!");
-    fs_key->mode = FS_ENCRYPTION_MODE_AES_256_XTS;
-    fs_key->size = key.size();
-    memset(fs_key->raw, 0, sizeof(fs_key->raw));
+    static_assert(FSCRYPT_MAX_KEY_SIZE == sizeof(fs_key->raw), "Mismatch of max key sizes");
+    fs_key->mode = 0;  // unused by kernel
     memcpy(fs_key->raw, key.data(), key.size());
+    fs_key->size = key.size();
     return true;
 }
 
