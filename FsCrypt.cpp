@@ -21,7 +21,6 @@
 #include "KeyUtil.h"
 #include "Utils.h"
 #include "VoldUtil.h"
-#include "model/Disk.h"
 
 #include <algorithm>
 #include <map>
@@ -222,8 +221,7 @@ static int get_data_file_policy_version(void) {
 // Retrieve the options to use for encryption policies on adoptable storage.
 static bool get_volume_file_encryption_options(EncryptionOptions* options, int flags) {
     auto contents_mode =
-            android::base::GetProperty("ro.crypto.volume.contents_mode",
-                                       is_ice_supported_external(flags) ? "ice" : "aes-256-xts");
+            android::base::GetProperty("ro.crypto.volume.contents_mode", "aes-256-xts");
     auto filenames_mode =
             android::base::GetProperty("ro.crypto.volume.filenames_mode", "aes-256-heh");
     return ParseOptions(android::base::GetProperty("ro.crypto.volume.options",
@@ -241,24 +239,11 @@ static bool evict_data_key(const std::string& raw_ref) {
     return android::vold::evictKey(DATA_MNT_POINT, raw_ref, get_data_file_policy_version());
 }
 
-bool is_ice_supported_external(int flags) {
-    /*
-     * Logic can be changed when more card controllers start supporting ICE.
-     * Until then, checking only for UFS card.
-     */
-    if ((flags & android::vold::Disk::Flags::kUfsCard) ==
-                           android::vold::Disk::Flags::kUfsCard)
-        return true;
-    return false;
-}
-
 bool is_wrapped_key_supported() {
     return GetEntryForMountPoint(&fstab_default, DATA_MNT_POINT)->fs_mgr_flags.wrapped_key;
 }
 
-bool is_wrapped_key_supported_external(int flags) {
-    if (is_ice_supported_external(flags))
-        return GetEntryForMountPoint(&fstab_default, DATA_MNT_POINT)->fs_mgr_flags.wrapped_key;
+static bool is_wrapped_key_supported_external() {
     return false;
 }
 
@@ -676,7 +661,7 @@ static bool read_or_create_volkey(const std::string& misc_path, const std::strin
     android::vold::KeyAuthentication auth("", secdiscardable_hash);
 
     if (!get_volume_file_encryption_options(&policy->options, flags)) return false;
-    wrapped_key_supported = is_wrapped_key_supported_external(flags);
+    wrapped_key_supported = is_wrapped_key_supported_external();
 
     return android::vold::retrieveAndInstallKey(true, auth, key_path, key_path + "_tmp",
                                                 volume_uuid, policy->options.version,
