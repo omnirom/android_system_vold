@@ -37,7 +37,7 @@ namespace vold {
  */
 class PrivateVolume : public VolumeBase {
   public:
-    PrivateVolume(dev_t device, const std::string& keyRaw, int flags);
+    PrivateVolume(dev_t device, const std::string& keyRaw);
     virtual ~PrivateVolume();
     const std::string& getFsType() const { return mFsType; };
     const std::string& getRawDevPath() const { return mRawDevPath; };
@@ -66,8 +66,7 @@ class PrivateVolume : public VolumeBase {
 
     /* Encryption key as raw bytes */
     std::string mKeyRaw;
-    /* Flags associated with corresponding disk */
-    int mDiskFlags;
+
     /* Filesystem type */
     std::string mFsType;
     /* Filesystem UUID */
