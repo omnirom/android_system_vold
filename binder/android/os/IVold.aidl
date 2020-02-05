@@ -54,7 +54,7 @@ interface IVold {
 
     void remountUid(int uid, int remountMode);
 
-    void mkdirs(@utf8InCpp String path);
+    void setupAppDir(@utf8InCpp String path, @utf8InCpp String appDirRoot, int appUid);
 
     @utf8InCpp String createObb(@utf8InCpp String sourcePath, @utf8InCpp String sourceKey,
                                 int ownerGid);
@@ -92,7 +92,8 @@ interface IVold {
 
     void addUserKeyAuth(int userId, int userSerial, @utf8InCpp String token,
                         @utf8InCpp String secret);
-    void clearUserKeyAuth(int userId, int userSerial, @utf8InCpp String token, @utf8InCpp String secret);
+    void clearUserKeyAuth(int userId, int userSerial, @utf8InCpp String token,
+                        @utf8InCpp String secret);
     void fixateNewestUserKeyAuth(int userId);
 
     void unlockUserKey(int userId, int userSerial, @utf8InCpp String token,
@@ -168,6 +169,7 @@ interface IVold {
     const int REMOUNT_MODE_INSTALLER = 5;
     const int REMOUNT_MODE_FULL = 6;
     const int REMOUNT_MODE_PASS_THROUGH = 7;
+    const int REMOUNT_MODE_ANDROID_WRITABLE = 8;
 
     const int VOLUME_STATE_UNMOUNTED = 0;
     const int VOLUME_STATE_CHECKING = 1;
