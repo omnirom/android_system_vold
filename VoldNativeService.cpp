@@ -456,12 +456,14 @@ binder::Status VoldNativeService::remountUid(int32_t uid, int32_t remountMode) {
     return translate(VolumeManager::Instance()->remountUid(uid, remountMode));
 }
 
-binder::Status VoldNativeService::mkdirs(const std::string& path) {
+binder::Status VoldNativeService::setupAppDir(const std::string& path,
+                                              const std::string& appDirRoot, int32_t appUid) {
     ENFORCE_SYSTEM_OR_ROOT;
     CHECK_ARGUMENT_PATH(path);
+    CHECK_ARGUMENT_PATH(appDirRoot);
     ACQUIRE_LOCK;
 
-    return translate(VolumeManager::Instance()->mkdirs(path));
+    return translate(VolumeManager::Instance()->setupAppDir(path, appDirRoot, appUid));
 }
 
 binder::Status VoldNativeService::createObb(const std::string& sourcePath,
@@ -768,7 +770,8 @@ binder::Status VoldNativeService::addUserKeyAuth(int32_t userId, int32_t userSer
 }
 
 binder::Status VoldNativeService::clearUserKeyAuth(int32_t userId, int32_t userSerial,
-        const std::string& token, const std::string& secret) {
+                                                   const std::string& token,
+                                                   const std::string& secret) {
     ENFORCE_SYSTEM_OR_ROOT;
     ACQUIRE_CRYPT_LOCK;
 

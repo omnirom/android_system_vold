@@ -55,6 +55,7 @@
 
 using namespace std::chrono_literals;
 using android::base::ReadFileToString;
+using android::base::StartsWith;
 using android::base::StringPrintf;
 
 namespace android {
@@ -112,6 +113,27 @@ status_t DestroyDeviceNode(const std::string& path) {
     } else {
         return OK;
     }
+}
+
+int PrepareDirsFromRoot(std::string path, std::string root, mode_t mode, uid_t uid, gid_t gid) {
+    int ret = 0;
+    if (!StartsWith(path, root)) {
+        return -1;
+    }
+    std::string to_create_from_root = path.substr(root.length());
+
+    size_t pos = 0;
+    while ((pos = to_create_from_root.find('/')) != std::string::npos) {
+        auto component = to_create_from_root.substr(0, pos);
+        to_create_from_root.erase(0, pos + 1);
+        root = root + component + "/";
+        ret = fs_prepare_dir(root.c_str(), mode, uid, gid);
+        if (ret) {
+            break;
+        }
+    }
+
+    return ret;
 }
 
 status_t PrepareDir(const std::string& path, mode_t mode, uid_t uid, gid_t gid) {
@@ -995,11 +1017,21 @@ status_t MountUserFuse(userid_t user_id, const std::string& absolute_lower_path,
     std::string pass_through_path(
             StringPrintf("%s/%s", pre_pass_through_path.c_str(), relative_upper_path.c_str()));
 
-    std::string sdcardfs_path(
-            StringPrintf("/mnt/runtime/full/%s", relative_upper_path.c_str()));
+    // Ensure that /mnt/user is 0700. With FUSE, apps don't need access to /mnt/user paths directly.
+    // Without FUSE however, apps need /mnt/user access so /mnt/user in init.rc is 0755 until here
+    auto result = PrepareDir("/mnt/user", 0700, AID_ROOT, AID_ROOT);
+    if (result != android::OK) {
+        PLOG(ERROR) << "Failed to prepare directory /mnt/user";
+        return -1;
+    }
 
-    // Create directories.
-    auto result = PrepareDir(pre_fuse_path, 0700, AID_ROOT, AID_ROOT);
+    // Shell is neither AID_ROOT nor AID_EVERYBODY. Since it equally needs 'execute' access to
+    // /mnt/user/0 to 'adb shell ls /sdcard' for instance, we set the uid bit of /mnt/user/0 to
+    // AID_SHELL. This gives shell access along with apps running as group everybody (user 0 apps)
+    // These bits should be consistent with what is set in zygote in
+    // com_android_internal_os_Zygote#MountEmulatedStorage on volume bind mount during app fork
+    result = PrepareDir(pre_fuse_path, 0710, user_id ? AID_ROOT : AID_SHELL,
+                             multiuser_get_uid(user_id, AID_EVERYBODY));
     if (result != android::OK) {
         PLOG(ERROR) << "Failed to prepare directory " << pre_fuse_path;
         return -1;
@@ -1031,8 +1063,16 @@ status_t MountUserFuse(userid_t user_id, const std::string& absolute_lower_path,
             return -1;
         }
         linkpath += "/primary";
+        Symlink("/storage/emulated/" + std::to_string(user_id), linkpath);
 
-        Symlink(fuse_path + "/" + std::to_string(user_id), linkpath);
+        std::string pass_through_linkpath(StringPrintf("/mnt/pass_through/%d/self", user_id));
+        result = PrepareDir(pass_through_linkpath, 0755, AID_ROOT, AID_ROOT);
+        if (result != android::OK) {
+            PLOG(ERROR) << "Failed to prepare directory " << pass_through_linkpath;
+            return -1;
+        }
+        pass_through_linkpath += "/primary";
+        Symlink("/storage/emulated/" + std::to_string(user_id), pass_through_linkpath);
     }
 
     // Open fuse fd.
@@ -1059,8 +1099,16 @@ status_t MountUserFuse(userid_t user_id, const std::string& absolute_lower_path,
         return -errno;
     }
 
-    LOG(INFO) << "Bind mounting " << sdcardfs_path << " to " << pass_through_path;
-    return BindMount(sdcardfs_path, pass_through_path);
+    if (IsFilesystemSupported("sdcardfs")) {
+        std::string sdcardfs_path(
+                StringPrintf("/mnt/runtime/full/%s", relative_upper_path.c_str()));
+
+        LOG(INFO) << "Bind mounting " << sdcardfs_path << " to " << pass_through_path;
+        return BindMount(sdcardfs_path, pass_through_path);
+    } else {
+        LOG(INFO) << "Bind mounting " << absolute_lower_path << " to " << pass_through_path;
+        return BindMount(absolute_lower_path, pass_through_path);
+    }
 }
 
 status_t UnmountUserFuse(userid_t user_id, const std::string& absolute_lower_path,
