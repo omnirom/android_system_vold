@@ -115,6 +115,25 @@ status_t DestroyDeviceNode(const std::string& path) {
     }
 }
 
+int SetQuotaProjectId(std::string path, long projectId) {
+    struct fsxattr fsx;
+
+    android::base::unique_fd fd(TEMP_FAILURE_RETRY(open(path.c_str(), O_RDONLY | O_CLOEXEC)));
+    if (fd == -1) {
+        PLOG(ERROR) << "Failed to open " << path << " to set project id.";
+        return -1;
+    }
+
+    int ret = ioctl(fd, FS_IOC_FSGETXATTR, &fsx);
+    if (ret == -1) {
+        PLOG(ERROR) << "Failed to get extended attributes for " << path << " to get project id.";
+        return ret;
+    }
+
+    fsx.fsx_projid = projectId;
+    return ioctl(fd, FS_IOC_FSSETXATTR, &fsx);
+}
+
 int PrepareDirsFromRoot(std::string path, std::string root, mode_t mode, uid_t uid, gid_t gid) {
     int ret = 0;
     if (!StartsWith(path, root)) {
@@ -1019,7 +1038,7 @@ status_t MountUserFuse(userid_t user_id, const std::string& absolute_lower_path,
 
     // Ensure that /mnt/user is 0700. With FUSE, apps don't need access to /mnt/user paths directly.
     // Without FUSE however, apps need /mnt/user access so /mnt/user in init.rc is 0755 until here
-    auto result = PrepareDir("/mnt/user", 0700, AID_ROOT, AID_ROOT);
+    auto result = PrepareDir("/mnt/user", 0750, AID_ROOT, AID_MEDIA_RW);
     if (result != android::OK) {
         PLOG(ERROR) << "Failed to prepare directory /mnt/user";
         return -1;
@@ -1043,13 +1062,13 @@ status_t MountUserFuse(userid_t user_id, const std::string& absolute_lower_path,
         return -1;
     }
 
-    result = PrepareDir(pre_pass_through_path, 0755, AID_ROOT, AID_ROOT);
+    result = PrepareDir(pre_pass_through_path, 0710, AID_ROOT, AID_MEDIA_RW);
     if (result != android::OK) {
         PLOG(ERROR) << "Failed to prepare directory " << pre_pass_through_path;
         return -1;
     }
 
-    result = PrepareDir(pass_through_path, 0755, AID_ROOT, AID_ROOT);
+    result = PrepareDir(pass_through_path, 0710, AID_ROOT, AID_MEDIA_RW);
     if (result != android::OK) {
         PLOG(ERROR) << "Failed to prepare directory " << pass_through_path;
         return -1;
@@ -1066,7 +1085,7 @@ status_t MountUserFuse(userid_t user_id, const std::string& absolute_lower_path,
         Symlink("/storage/emulated/" + std::to_string(user_id), linkpath);
 
         std::string pass_through_linkpath(StringPrintf("/mnt/pass_through/%d/self", user_id));
-        result = PrepareDir(pass_through_linkpath, 0755, AID_ROOT, AID_ROOT);
+        result = PrepareDir(pass_through_linkpath, 0710, AID_ROOT, AID_MEDIA_RW);
         if (result != android::OK) {
             PLOG(ERROR) << "Failed to prepare directory " << pass_through_linkpath;
             return -1;
