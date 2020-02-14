@@ -136,66 +136,33 @@ static bool generateKeymasterKey(Keymaster& keymaster, const KeyAuthentication& 
            keymaster.generateKey(paramBuilder, key);
 }
 
-bool generateWrappedKey(userid_t user_id, KeyType key_type,
-                                     KeyBuffer* key) {
+bool generateWrappedStorageKey(KeyBuffer* key) {
     Keymaster keymaster;
     if (!keymaster) return false;
-    *key = KeyBuffer(EXT4_AES_256_XTS_KEY_SIZE);
     std::string key_temp;
-    auto paramBuilder = km::AuthorizationSetBuilder()
-                               .AesEncryptionKey(AES_KEY_BYTES * 8)
-                               .GcmModeMinMacLen(GCM_MAC_BYTES * 8)
-                               .Authorization(km::TAG_USER_ID, user_id);
+    auto paramBuilder = km::AuthorizationSetBuilder().AesEncryptionKey(AES_KEY_BYTES * 8);
     km::KeyParameter param1;
     param1.tag = static_cast<::android::hardware::keymaster::V4_0::Tag>(
-        ::android::hardware::keymaster::V4_0::KM_TAG_FBE_ICE);
+        android::hardware::keymaster::V4_0::KM_TAG_FBE_ICE);
     param1.f.boolValue = true;
     paramBuilder.push_back(param1);
-
-    km::KeyParameter param2;
-    if ((key_type == KeyType::DE_USER) || (key_type == KeyType::DE_SYS) || (key_type == KeyType::ME)) {
-        param2.tag = static_cast<::android::hardware::keymaster::V4_0::Tag>(
-            ::android::hardware::keymaster::V4_0::KM_TAG_KEY_TYPE);
-        param2.f.integer = 0;
-    } else if (key_type == KeyType::CE_USER) {
-        param2.tag = static_cast<::android::hardware::keymaster::V4_0::Tag>(
-            ::android::hardware::keymaster::V4_0::KM_TAG_KEY_TYPE);
-        param2.f.integer = 1;
-    }
-    paramBuilder.push_back(param2);
-
+    //paramBuilder.Authorization(km::TAG_ROLLBACK_RESISTANCE);
+    //paramBuilder.Authorization(km::TAG_STORAGE_KEY);
     if (!keymaster.generateKey(paramBuilder, &key_temp)) return false;
     *key = KeyBuffer(key_temp.size());
     memcpy(reinterpret_cast<void*>(key->data()), key_temp.c_str(), key->size());
     return true;
 }
 
-bool getEphemeralWrappedKey(km::KeyFormat format, KeyBuffer& kmKey, KeyBuffer* key) {
-    std::string key_temp;
+bool exportWrappedStorageKey(const KeyBuffer& kmKey, KeyBuffer* key) {
     Keymaster keymaster;
     if (!keymaster) return false;
+    std::string key_temp;
 
-    //Export once, if upgrade needed, upgrade and export again
-    bool export_again = true;
-    while (export_again) {
-        export_again = false;
-        auto ret = keymaster.exportKey(format, kmKey, "!", "!", &key_temp);
-        if (ret == km::ErrorCode::OK) {
-            *key = KeyBuffer(key_temp.size());
-            memcpy(reinterpret_cast<void*>(key->data()), key_temp.c_str(), key->size());
-            return true;
-        }
-        if (ret != km::ErrorCode::KEY_REQUIRES_UPGRADE) return false;
-        LOG(DEBUG) << "Upgrading key";
-        std::string kmKeyStr(reinterpret_cast<const char*>(kmKey.data()), kmKey.size());
-        std::string newKey;
-        if (!keymaster.upgradeKey(kmKeyStr, km::AuthorizationSet(), &newKey)) return false;
-        memcpy(reinterpret_cast<void*>(kmKey.data()), newKey.c_str(), kmKey.size());
-        LOG(INFO) << "Key upgraded";
-        export_again = true;
-    }
-    //Should never come here
-    return false;
+    if (!keymaster.exportKey(kmKey, &key_temp)) return false;
+    *key = KeyBuffer(key_temp.size());
+    memcpy(reinterpret_cast<void*>(key->data()), key_temp.c_str(), key->size());
+    return true;
 }
 
 static std::pair<km::AuthorizationSet, km::HardwareAuthToken> beginParams(

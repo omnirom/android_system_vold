@@ -44,8 +44,6 @@
 
 #include "android/os/IVold.h"
 
-#include "cryptfs.h"
-
 #define EMULATED_USES_SELINUX 0
 #define MANAGE_MISC_DIRS 0
 
@@ -65,10 +63,11 @@
 using android::base::StringPrintf;
 using android::fs_mgr::GetEntryForMountPoint;
 using android::vold::BuildDataPath;
+using android::vold::IsFilesystemSupported;
 using android::vold::kEmptyAuthentication;
 using android::vold::KeyBuffer;
-using android::vold::Keymaster;
-using android::hardware::keymaster::V4_0::KeyFormat;
+using android::vold::SetQuotaInherit;
+using android::vold::SetQuotaProjectId;
 using android::vold::writeStringToFile;
 using namespace android::fscrypt;
 
@@ -210,7 +209,24 @@ static bool get_data_file_encryption_options(EncryptionOptions* options) {
                    << entry->encryption_options;
         return false;
     }
+    if (options->version == 1) {
+        options->use_hw_wrapped_key =
+            GetEntryForMountPoint(&fstab_default, DATA_MNT_POINT)->fs_mgr_flags.wrapped_key;
+    }
     return true;
+}
+
+static bool install_storage_key(const std::string& mountpoint, const EncryptionOptions& options,
+                                const KeyBuffer& key, EncryptionPolicy* policy) {
+    KeyBuffer ephemeral_wrapped_key;
+    if (options.use_hw_wrapped_key) {
+        if (!exportWrappedStorageKey(key, &ephemeral_wrapped_key)) {
+            LOG(ERROR) << "Failed to get ephemeral wrapped key";
+            return false;
+        }
+    }
+    return installKey(mountpoint, options, options.use_hw_wrapped_key ? ephemeral_wrapped_key : key,
+                      policy);
 }
 
 // Retrieve the options to use for encryption policies on adoptable storage.
@@ -228,10 +244,6 @@ static bool get_volume_file_encryption_options(EncryptionOptions* options) {
     return true;
 }
 
-bool is_wrapped_key_supported() {
-    return GetEntryForMountPoint(&fstab_default, DATA_MNT_POINT)->fs_mgr_flags.wrapped_key;
-}
-
 bool is_metadata_wrapped_key_supported() {
     return GetEntryForMountPoint(&fstab_default, METADATA_MNT_POINT)->fs_mgr_flags.wrapped_key;
 }
@@ -243,16 +255,8 @@ static bool read_and_install_user_ce_key(userid_t user_id,
     if (!get_data_file_encryption_options(&options)) return false;
     KeyBuffer ce_key;
     if (!read_and_fixate_user_ce_key(user_id, auth, &ce_key)) return false;
-    if (is_wrapped_key_supported()) {
-        KeyBuffer ephemeral_wrapped_key;
-        if (!getEphemeralWrappedKey(KeyFormat::RAW, ce_key, &ephemeral_wrapped_key)) {
-           LOG(ERROR) << "Failed to export ce key";
-           return false;
-        }
-        ce_key = std::move(ephemeral_wrapped_key);
-    }
     EncryptionPolicy ce_policy;
-    if (!installKey(DATA_MNT_POINT, options, ce_key, &ce_policy)) return false;
+    if (!install_storage_key(DATA_MNT_POINT, options, ce_key, &ce_policy)) return false;
     s_ce_policies[user_id] = ce_policy;
     LOG(DEBUG) << "Installed ce key for user " << user_id;
     return true;
@@ -282,15 +286,8 @@ static bool create_and_install_user_keys(userid_t user_id, bool create_ephemeral
     EncryptionOptions options;
     if (!get_data_file_encryption_options(&options)) return false;
     KeyBuffer de_key, ce_key;
-
-    if(is_wrapped_key_supported()) {
-        if (!generateWrappedKey(user_id, android::vold::KeyType::DE_USER, &de_key)) return false;
-        if (!generateWrappedKey(user_id, android::vold::KeyType::CE_USER, &ce_key)) return false;
-    } else {
-        if (!android::vold::randomKey(&de_key)) return false;
-        if (!android::vold::randomKey(&ce_key)) return false;
-    }
-
+    if (!generateStorageKey(options, &de_key)) return false;
+    if (!generateStorageKey(options, &ce_key)) return false;
     if (create_ephemeral) {
         // If the key should be created as ephemeral, don't store it.
         s_ephemeral_users.insert(user_id);
@@ -309,29 +306,11 @@ static bool create_and_install_user_keys(userid_t user_id, bool create_ephemeral
                                                kEmptyAuthentication, de_key))
             return false;
     }
-    if (is_wrapped_key_supported()) {
-        KeyBuffer ephemeral_wrapped_de_key;
-        KeyBuffer ephemeral_wrapped_ce_key;
-
-        /* Export and install the DE keys */
-        if (!getEphemeralWrappedKey(KeyFormat::RAW, de_key, &ephemeral_wrapped_de_key)) {
-           LOG(ERROR) << "Failed to export de_key";
-           return false;
-        }
-        /* Export and install the CE keys */
-        if (!getEphemeralWrappedKey(KeyFormat::RAW, ce_key, &ephemeral_wrapped_ce_key)) {
-           LOG(ERROR) << "Failed to export de_key";
-           return false;
-        }
-
-        de_key = std::move(ephemeral_wrapped_de_key);
-        ce_key = std::move(ephemeral_wrapped_ce_key);
-    }
     EncryptionPolicy de_policy;
-    if (!installKey(DATA_MNT_POINT, options, de_key, &de_policy)) return false;
+    if (!install_storage_key(DATA_MNT_POINT, options, de_key, &de_policy)) return false;
     s_de_policies[user_id] = de_policy;
     EncryptionPolicy ce_policy;
-    if (!installKey(DATA_MNT_POINT, options, ce_key, &ce_policy)) return false;
+    if (!install_storage_key(DATA_MNT_POINT, options, ce_key, &ce_policy)) return false;
     s_ce_policies[user_id] = ce_policy;
     LOG(DEBUG) << "Created keys for user " << user_id;
     return true;
@@ -383,16 +362,8 @@ static bool load_all_de_keys() {
             auto key_path = de_dir + "/" + entry->d_name;
             KeyBuffer de_key;
             if (!android::vold::retrieveKey(key_path, kEmptyAuthentication, &de_key)) return false;
-            if (is_wrapped_key_supported()) {
-                KeyBuffer ephemeral_wrapped_key;
-                if (!getEphemeralWrappedKey(KeyFormat::RAW, de_key, &ephemeral_wrapped_key)) {
-                   LOG(ERROR) << "Failed to export de_key in create_and_install_user_keys";
-                   return false;
-                }
-                de_key = std::move(ephemeral_wrapped_key);
-            }
             EncryptionPolicy de_policy;
-            if (!installKey(DATA_MNT_POINT, options, de_key, &de_policy)) return false;
+            if (!install_storage_key(DATA_MNT_POINT, options, de_key, &de_policy)) return false;
             s_de_policies[user_id] = de_policy;
             LOG(DEBUG) << "Installed de key for user " << user_id;
         }
@@ -404,7 +375,6 @@ static bool load_all_de_keys() {
 
 bool fscrypt_initialize_systemwide_keys() {
     LOG(INFO) << "fscrypt_initialize_systemwide_keys";
-    bool wrapped_key_supported = false;
 
     if (s_systemwide_keys_initialized) {
         LOG(INFO) << "Already initialized";
@@ -415,12 +385,11 @@ bool fscrypt_initialize_systemwide_keys() {
 
     KeyBuffer device_key;
     if (!android::vold::retrieveKey(true, kEmptyAuthentication, device_key_path, device_key_temp,
-                                    is_wrapped_key_supported(), &device_key))
+                                    options, &device_key))
         return false;
 
     EncryptionPolicy device_policy;
-    if (!android::vold::installKey(DATA_MNT_POINT, options, device_key, &device_policy))
-        return false;
+    if (!install_storage_key(DATA_MNT_POINT, options, device_key, &device_policy)) return false;
 
     std::string options_string;
     if (!OptionsToString(device_policy.options, &options_string)) {
@@ -435,10 +404,9 @@ bool fscrypt_initialize_systemwide_keys() {
     LOG(INFO) << "Wrote system DE key reference to:" << ref_filename;
 
     KeyBuffer per_boot_key;
-    if (!android::vold::randomKey(&per_boot_key)) return false;
+    if (!generateStorageKey(options, &per_boot_key)) return false;
     EncryptionPolicy per_boot_policy;
-    if (!android::vold::installKey(DATA_MNT_POINT, options, per_boot_key, &per_boot_policy))
-        return false;
+    if (!install_storage_key(DATA_MNT_POINT, options, per_boot_key, &per_boot_policy)) return false;
     std::string per_boot_ref_filename = std::string("/data") + fscrypt_key_per_boot_ref;
     if (!android::vold::writeStringToFile(per_boot_policy.key_raw_ref, per_boot_ref_filename))
         return false;
@@ -624,7 +592,6 @@ static bool read_or_create_volkey(const std::string& misc_path, const std::strin
                                   EncryptionPolicy* policy, int flags) {
     auto secdiscardable_path = volume_secdiscardable_path(volume_uuid);
     std::string secdiscardable_hash;
-    bool wrapped_key_supported = false;
     if (android::vold::pathExists(secdiscardable_path)) {
         if (!android::vold::readSecdiscardable(secdiscardable_path, &secdiscardable_hash))
             return false;
@@ -646,8 +613,9 @@ static bool read_or_create_volkey(const std::string& misc_path, const std::strin
     EncryptionOptions options;
     if (!get_volume_file_encryption_options(&options)) return false;
     KeyBuffer key;
-    if (!android::vold::retrieveKey(true, auth, key_path, key_path + "_tmp", false, &key)) return false;
-    if (!android::vold::installKey(BuildDataPath(volume_uuid), options, key, policy)) return false;
+    if (!android::vold::retrieveKey(true, auth, key_path, key_path + "_tmp", options, &key))
+        return false;
+    if (!install_storage_key(BuildDataPath(volume_uuid), options, key, policy)) return false;
     return true;
 }
 
@@ -840,6 +808,14 @@ bool fscrypt_prepare_user_storage(const std::string& volume_uuid, userid_t user_
             if (!prepare_dir(vendor_ce_path, 0771, AID_ROOT, AID_ROOT)) return false;
         }
         if (!prepare_dir(media_ce_path, 0770, AID_MEDIA_RW, AID_MEDIA_RW)) return false;
+        // Setup quota project ID and inheritance policy
+        if (!IsFilesystemSupported("sdcardfs")) {
+            if (SetQuotaInherit(media_ce_path) != 0) return false;
+            if (SetQuotaProjectId(media_ce_path, multiuser_get_uid(user_id, AID_MEDIA_RW)) != 0) {
+                return false;
+            }
+        }
+
         if (!prepare_dir(user_ce_path, 0771, AID_SYSTEM, AID_SYSTEM)) return false;
 
         if (fscrypt_is_native()) {

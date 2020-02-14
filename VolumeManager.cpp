@@ -63,7 +63,6 @@
 #include "VoldNativeService.h"
 #include "VoldUtil.h"
 #include "VolumeManager.h"
-#include "cryptfs.h"
 #include "fs/Ext4.h"
 #include "fs/Vfat.h"
 #include "model/EmulatedVolume.h"
@@ -81,7 +80,9 @@ using android::vold::BindMount;
 using android::vold::CreateDir;
 using android::vold::DeleteDirContents;
 using android::vold::DeleteDirContentsAndDir;
-using android::vold::PrepareDirsFromRoot;
+using android::vold::IsFilesystemSupported;
+using android::vold::PrepareAndroidDirs;
+using android::vold::PrepareAppDirFromRoot;
 using android::vold::PrivateVolume;
 using android::vold::Symlink;
 using android::vold::Unlink;
@@ -822,8 +823,7 @@ int VolumeManager::unmountAll() {
     return 0;
 }
 
-int VolumeManager::setupAppDir(const std::string& path, const std::string& appDirRoot,
-                               int32_t appUid) {
+int VolumeManager::setupAppDir(const std::string& path, int32_t appUid) {
     // Only offer to create directories for paths managed by vold
     if (!StartsWith(path, "/storage/")) {
         LOG(ERROR) << "Failed to find mounted volume for " << path;
@@ -865,17 +865,19 @@ int VolumeManager::setupAppDir(const std::string& path, const std::string& appDi
     // on /storage/emulated/10 means /mnt/user/0/emulated/10
     const std::string lowerPath =
             volume->getInternalPath() + path.substr(volume->getPath().length());
-    const std::string lowerAppDirRoot =
-            volume->getInternalPath() + appDirRoot.substr(volume->getPath().length());
 
-    // First create the root which holds app dirs, if needed.
-    int ret = PrepareDirsFromRoot(lowerAppDirRoot, volume->getInternalPath(), 0771, AID_MEDIA_RW,
-                                  AID_MEDIA_RW);
+    // Do some sanity checking on the app dir (relative from root)
+    const std::string volumeRoot = volume->getRootPath();  // eg /data/media/0
+
+    // Make sure the Android/ directories exist and are setup correctly
+    int ret = PrepareAndroidDirs(volumeRoot);
     if (ret != 0) {
+        LOG(ERROR) << "Failed to prepare Android/ directories.";
         return ret;
     }
-    // Then, create app-specific dirs with the correct UID/GID
-    return PrepareDirsFromRoot(lowerPath, lowerAppDirRoot, 0770, appUid, AID_MEDIA_RW);
+
+    // Finally, create the app paths we need
+    return PrepareAppDirFromRoot(lowerPath, appUid);
 }
 
 int VolumeManager::createObb(const std::string& sourcePath, const std::string& sourceKey,

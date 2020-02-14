@@ -138,30 +138,25 @@ bool Keymaster::generateKey(const km::AuthorizationSet& inParams, std::string* k
     return true;
 }
 
-km::ErrorCode Keymaster::exportKey(km::KeyFormat format, KeyBuffer& kmKey, const std::string& clientId,
-                          const std::string& appData, std::string* key) {
+bool Keymaster::exportKey(const KeyBuffer& kmKey, std::string* key) {
     auto kmKeyBlob = km::support::blob2hidlVec(std::string(kmKey.data(), kmKey.size()));
-    auto emptyAssign = NULL;
-    auto kmClientId = (clientId == "!") ? emptyAssign: km::support::blob2hidlVec(clientId);
-    auto kmAppData = (appData == "!") ? emptyAssign: km::support::blob2hidlVec(appData);
     km::ErrorCode km_error;
     auto hidlCb = [&](km::ErrorCode ret, const hidl_vec<uint8_t>& exportedKeyBlob) {
         km_error = ret;
         if (km_error != km::ErrorCode::OK) return;
-        if(key)
-            key->assign(reinterpret_cast<const char*>(&exportedKeyBlob[0]),
-                            exportedKeyBlob.size());
+        if (key)
+            key->assign(reinterpret_cast<const char*>(&exportedKeyBlob[0]), exportedKeyBlob.size());
     };
-    auto error = mDevice->exportKey(format, kmKeyBlob, kmClientId, kmAppData, hidlCb);
+    auto error = mDevice->exportKey(km::KeyFormat::RAW, kmKeyBlob, {}, {}, hidlCb);
     if (!error.isOk()) {
         LOG(ERROR) << "export_key failed: " << error.description();
-        return km::ErrorCode::UNKNOWN_ERROR;
+        return false;
     }
     if (km_error != km::ErrorCode::OK) {
         LOG(ERROR) << "export_key failed, code " << int32_t(km_error);
-        return km_error;
+        return false;
     }
-    return km::ErrorCode::OK;
+    return true;
 }
 
 bool Keymaster::deleteKey(const std::string& key) {
@@ -231,6 +226,17 @@ KeymasterOperation Keymaster::begin(km::KeyPurpose purpose, const std::string& k
 
 bool Keymaster::isSecure() {
     return mDevice->halVersion().securityLevel != km::SecurityLevel::SOFTWARE;
+}
+
+void Keymaster::earlyBootEnded() {
+    auto error = mDevice->earlyBootEnded();
+    if (!error.isOk()) {
+        LOG(ERROR) << "earlyBootEnded failed: " << error.description();
+    }
+    km::V4_1_ErrorCode km_error = error;
+    if (km_error != km::V4_1_ErrorCode::OK && km_error != km::V4_1_ErrorCode::UNIMPLEMENTED) {
+        LOG(ERROR) << "Error reporting early boot ending to keymaster: " << int32_t(km_error);
+    }
 }
 
 }  // namespace vold
