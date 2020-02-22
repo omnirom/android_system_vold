@@ -33,6 +33,8 @@ using namespace android::fscrypt;
 
 bool randomKey(KeyBuffer* key);
 
+bool generateStorageKey(const EncryptionOptions& options, KeyBuffer* key);
+
 bool isFsKeyringSupported(void);
 
 // Install a file-based encryption key to the kernel, for use by encrypted files
@@ -59,7 +61,7 @@ bool evictKey(const std::string& mountpoint, const EncryptionPolicy& policy);
 
 bool retrieveKey(bool create_if_absent, const KeyAuthentication& key_authentication,
                  const std::string& key_path, const std::string& tmp_path,
-                 bool wrapped_key_supported, KeyBuffer* key, bool keepOld = true);
+                 const EncryptionOptions& options, KeyBuffer* key, bool keepOld = true);
 
 }  // namespace vold
 }  // namespace android

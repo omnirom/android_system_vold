@@ -23,6 +23,9 @@ extern android::fs_mgr::Fstab fstab_default;
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(*(a)))
 
+#define DATA_MNT_POINT "/data"
+#define METADATA_MNT_POINT "/metadata"
+
 #ifdef CONFIG_HW_DISK_ENCRYPT_PERF
 void get_blkdev_start_sector(int fd, unsigned long* st_sec);
 #endif

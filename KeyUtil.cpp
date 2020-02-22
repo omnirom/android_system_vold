@@ -29,6 +29,7 @@
 #include <android-base/logging.h>
 #include <keyutils.h>
 
+#include <fscrypt_uapi.h>
 #include "FsCrypt.h"
 #include "KeyStorage.h"
 #include "Utils.h"
@@ -48,6 +49,13 @@ bool randomKey(KeyBuffer* key) {
         return false;
     }
     return true;
+}
+
+bool generateStorageKey(const EncryptionOptions& options, KeyBuffer* key) {
+    if (options.use_hw_wrapped_key) {
+        return generateWrappedStorageKey(key);
+    }
+    return randomKey(key);
 }
 
 // Return true if the kernel supports the ioctls to add/remove fscrypt keys
@@ -206,7 +214,7 @@ bool installKey(const std::string& mountpoint, const EncryptionOptions& options,
             // A key for a v1 policy is specified by an arbitrary 8-byte
             // "descriptor", which must be provided by userspace.  We use the
             // first 8 bytes from the double SHA-512 of the key itself.
-            if (is_wrapped_key_supported()) {
+            if (options.use_hw_wrapped_key) {
                 /* When wrapped key is supported, only the first 32 bytes are
                    the same per boot. The second 32 bytes can change as the ephemeral
                    key is different. */
@@ -234,6 +242,7 @@ bool installKey(const std::string& mountpoint, const EncryptionOptions& options,
             return false;
     }
 
+    if (options.use_hw_wrapped_key) arg->flags |= FSCRYPT_ADD_KEY_FLAG_WRAPPED;
     // Provide the raw key.
     arg->raw_size = key.size();
     memcpy(arg->raw, key.data(), key.size());
@@ -320,7 +329,7 @@ bool evictKey(const std::string& mountpoint, const EncryptionPolicy& policy) {
 
 bool retrieveKey(bool create_if_absent, const KeyAuthentication& key_authentication,
                  const std::string& key_path, const std::string& tmp_path,
-                 bool wrapped_key_supported, KeyBuffer* key, bool keepOld) {
+                 const EncryptionOptions& options, KeyBuffer* key, bool keepOld) {
     if (pathExists(key_path)) {
         LOG(DEBUG) << "Key exists, using: " << key_path;
         if (!retrieveKey(key_path, key_authentication, key, keepOld)) return false;
@@ -330,20 +339,8 @@ bool retrieveKey(bool create_if_absent, const KeyAuthentication& key_authenticat
             return false;
         }
         LOG(INFO) << "Creating new key in " << key_path;
-        if (wrapped_key_supported) {
-            if(!generateWrappedKey(MAX_USER_ID, KeyType::ME, key)) return false;
-        } else {
-            if (!randomKey(key)) return false;
-        }
+        if (!generateStorageKey(options, key)) return false;
         if (!storeKeyAtomically(key_path, tmp_path, key_authentication, *key)) return false;
-    }
-    if (wrapped_key_supported) {
-        KeyBuffer ephemeral_wrapped_key;
-        if (!getEphemeralWrappedKey(KeyFormat::RAW, *key, &ephemeral_wrapped_key)) {
-            LOG(ERROR) << "Failed to export key for generated key";
-            return false;
-        }
-        *key = std::move(ephemeral_wrapped_key);
     }
     return true;
 }
