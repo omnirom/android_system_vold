@@ -41,6 +41,7 @@
 #include <unistd.h>
 
 #include <private/android_filesystem_config.h>
+#include <private/android_projectid_config.h>
 
 #include "android/os/IVold.h"
 
@@ -66,6 +67,9 @@ using android::vold::BuildDataPath;
 using android::vold::IsFilesystemSupported;
 using android::vold::kEmptyAuthentication;
 using android::vold::KeyBuffer;
+using android::vold::KeyGeneration;
+using android::vold::retrieveKey;
+using android::vold::retrieveOrGenerateKey;
 using android::vold::SetQuotaInherit;
 using android::vold::SetQuotaProjectId;
 using android::vold::writeStringToFile;
@@ -94,6 +98,11 @@ std::map<userid_t, EncryptionPolicy> s_de_policies;
 std::map<userid_t, EncryptionPolicy> s_ce_policies;
 
 }  // namespace
+
+// Returns KeyGeneration suitable for key as described in EncryptionOptions
+static KeyGeneration makeGen(const EncryptionOptions& options) {
+    return KeyGeneration{FSCRYPT_MAX_KEY_SIZE, true, options.use_hw_wrapped_key};
+}
 
 static bool fscrypt_is_emulated() {
     return property_get_bool("persist.sys.emulate_fbe", false);
@@ -187,7 +196,7 @@ static bool read_and_fixate_user_ce_key(userid_t user_id,
     auto const paths = get_ce_key_paths(directory_path);
     for (auto const ce_key_path : paths) {
         LOG(DEBUG) << "Trying user CE key " << ce_key_path;
-        if (android::vold::retrieveKey(ce_key_path, auth, ce_key)) {
+        if (retrieveKey(ce_key_path, auth, ce_key)) {
             LOG(DEBUG) << "Successfully retrieved key";
             fixate_user_ce_key(directory_path, ce_key_path, paths);
             return true;
@@ -231,13 +240,18 @@ static bool install_storage_key(const std::string& mountpoint, const EncryptionO
 
 // Retrieve the options to use for encryption policies on adoptable storage.
 static bool get_volume_file_encryption_options(EncryptionOptions* options) {
-    auto contents_mode =
-            android::base::GetProperty("ro.crypto.volume.contents_mode", "aes-256-xts");
+    // If we give the empty string, libfscrypt will use the default (currently XTS)
+    auto contents_mode = android::base::GetProperty("ro.crypto.volume.contents_mode", "");
+    // HEH as default was always a mistake. Use the libfscrypt default (CTS)
+    // for devices launching on versions above Android 10.
+    auto first_api_level = GetFirstApiLevel();
+    constexpr uint64_t pre_gki_level = 29;
     auto filenames_mode =
-            android::base::GetProperty("ro.crypto.volume.filenames_mode", "aes-256-heh");
+            android::base::GetProperty("ro.crypto.volume.filenames_mode",
+                                       first_api_level > pre_gki_level ? "" : "aes-256-heh");
     auto options_string = android::base::GetProperty("ro.crypto.volume.options",
-                                                     contents_mode + ":" + filenames_mode + ":v1");
-    if (!ParseOptions(options_string, options)) {
+                                                     contents_mode + ":" + filenames_mode);
+    if (!ParseOptionsForApiLevel(first_api_level, options_string, options)) {
         LOG(ERROR) << "Unable to parse volume encryption options: " << options_string;
         return false;
     }
@@ -286,8 +300,8 @@ static bool create_and_install_user_keys(userid_t user_id, bool create_ephemeral
     EncryptionOptions options;
     if (!get_data_file_encryption_options(&options)) return false;
     KeyBuffer de_key, ce_key;
-    if (!generateStorageKey(options, &de_key)) return false;
-    if (!generateStorageKey(options, &ce_key)) return false;
+    if (!generateStorageKey(makeGen(options), &de_key)) return false;
+    if (!generateStorageKey(makeGen(options), &ce_key)) return false;
     if (create_ephemeral) {
         // If the key should be created as ephemeral, don't store it.
         s_ephemeral_users.insert(user_id);
@@ -361,7 +375,7 @@ static bool load_all_de_keys() {
         if (s_de_policies.count(user_id) == 0) {
             auto key_path = de_dir + "/" + entry->d_name;
             KeyBuffer de_key;
-            if (!android::vold::retrieveKey(key_path, kEmptyAuthentication, &de_key)) return false;
+            if (!retrieveKey(key_path, kEmptyAuthentication, &de_key)) return false;
             EncryptionPolicy de_policy;
             if (!install_storage_key(DATA_MNT_POINT, options, de_key, &de_policy)) return false;
             s_de_policies[user_id] = de_policy;
@@ -384,8 +398,8 @@ bool fscrypt_initialize_systemwide_keys() {
     if (!get_data_file_encryption_options(&options)) return false;
 
     KeyBuffer device_key;
-    if (!android::vold::retrieveKey(true, kEmptyAuthentication, device_key_path, device_key_temp,
-                                    options, &device_key))
+    if (!retrieveOrGenerateKey(device_key_path, device_key_temp, kEmptyAuthentication,
+                               makeGen(options), &device_key))
         return false;
 
     EncryptionPolicy device_policy;
@@ -404,7 +418,7 @@ bool fscrypt_initialize_systemwide_keys() {
     LOG(INFO) << "Wrote system DE key reference to:" << ref_filename;
 
     KeyBuffer per_boot_key;
-    if (!generateStorageKey(options, &per_boot_key)) return false;
+    if (!generateStorageKey(makeGen(options), &per_boot_key)) return false;
     EncryptionPolicy per_boot_policy;
     if (!install_storage_key(DATA_MNT_POINT, options, per_boot_key, &per_boot_policy)) return false;
     std::string per_boot_ref_filename = std::string("/data") + fscrypt_key_per_boot_ref;
@@ -613,7 +627,7 @@ static bool read_or_create_volkey(const std::string& misc_path, const std::strin
     EncryptionOptions options;
     if (!get_volume_file_encryption_options(&options)) return false;
     KeyBuffer key;
-    if (!android::vold::retrieveKey(true, auth, key_path, key_path + "_tmp", options, &key))
+    if (!retrieveOrGenerateKey(key_path, key_path + "_tmp", auth, makeGen(options), &key))
         return false;
     if (!install_storage_key(BuildDataPath(volume_uuid), options, key, policy)) return false;
     return true;
@@ -632,12 +646,12 @@ static bool fscrypt_rewrap_user_key(userid_t user_id, int serial,
     auto const directory_path = get_ce_key_directory_path(user_id);
     KeyBuffer ce_key;
     std::string ce_key_current_path = get_ce_key_current_path(directory_path);
-    if (android::vold::retrieveKey(ce_key_current_path, retrieve_auth, &ce_key)) {
+    if (retrieveKey(ce_key_current_path, retrieve_auth, &ce_key)) {
         LOG(DEBUG) << "Successfully retrieved key";
         // TODO(147732812): Remove this once Locksettingservice is fixed.
         // Currently it calls fscrypt_clear_user_key_auth with a secret when lockscreen is
         // changed from swipe to none or vice-versa
-    } else if (android::vold::retrieveKey(ce_key_current_path, kEmptyAuthentication, &ce_key)) {
+    } else if (retrieveKey(ce_key_current_path, kEmptyAuthentication, &ce_key)) {
         LOG(DEBUG) << "Successfully retrieved key with empty auth";
     } else {
         LOG(ERROR) << "Failed to retrieve key for user " << user_id;
@@ -811,7 +825,8 @@ bool fscrypt_prepare_user_storage(const std::string& volume_uuid, userid_t user_
         // Setup quota project ID and inheritance policy
         if (!IsFilesystemSupported("sdcardfs")) {
             if (SetQuotaInherit(media_ce_path) != 0) return false;
-            if (SetQuotaProjectId(media_ce_path, multiuser_get_uid(user_id, AID_MEDIA_RW)) != 0) {
+            if (SetQuotaProjectId(media_ce_path,
+                                  multiuser_get_uid(user_id, PROJECT_ID_EXT_DEFAULT)) != 0) {
                 return false;
             }
         }

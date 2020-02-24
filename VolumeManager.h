@@ -118,6 +118,10 @@ class VolumeManager {
     int setPrimary(const std::shared_ptr<android::vold::VolumeBase>& vol);
 
     int remountUid(uid_t uid, int32_t remountMode);
+    int remountAppObb(userid_t userId);
+
+    bool addFuseMountedUser(userid_t userId);
+    bool removeFuseMountedUser(userid_t userId);
 
     /* Reset all internal state, typically during framework boot */
     int reset();
@@ -157,12 +161,23 @@ class VolumeManager {
      * requirements of the underlying filesystem and are of no concern to the
      * caller.
      *
+     * If fixupExistingOnly is set, we make sure to fixup any existing dirs and
+     * files in the passed in path, but only if that path exists; if it doesn't
+     * exist, this function doesn't create them.
+     *
      * Validates that given paths are absolute and that they contain no relative
      * "." or ".." paths or symlinks.  Last path segment is treated as filename
      * and ignored, unless the path ends with "/".  Also ensures that path
      * belongs to a volume managed by vold.
      */
-    int setupAppDir(const std::string& path, int32_t appUid);
+    int setupAppDir(const std::string& path, int32_t appUid, bool fixupExistingOnly = false);
+
+    /**
+     * Fixes up an existing application directory, as if it was created with
+     * setupAppDir() above. This includes fixing up the UID/GID, permissions and
+     * project IDs of the contained files and directories.
+     */
+    int fixupAppDir(const std::string& path, int32_t appUid);
 
     int createObb(const std::string& path, const std::string& key, int32_t ownerGid,
                   std::string* outVolId);
@@ -170,7 +185,7 @@ class VolumeManager {
 
     int createStubVolume(const std::string& sourcePath, const std::string& mountPath,
                          const std::string& fsType, const std::string& fsUuid,
-                         const std::string& fsLabel, std::string* outVolId);
+                         const std::string& fsLabel, int32_t flags, std::string* outVolId);
     int destroyStubVolume(const std::string& volId);
 
     int mountAppFuse(uid_t uid, int mountId, android::base::unique_fd* device_fd);
@@ -190,6 +205,8 @@ class VolumeManager {
     void handleDiskChanged(dev_t device);
     void handleDiskRemoved(dev_t device);
 
+    bool updateFuseMountedProperty();
+
     std::mutex mLock;
     std::mutex mCryptLock;
 
@@ -199,7 +216,6 @@ class VolumeManager {
     std::list<std::shared_ptr<android::vold::Disk>> mDisks;
     std::list<std::shared_ptr<android::vold::Disk>> mPendingDisks;
     std::list<std::shared_ptr<android::vold::VolumeBase>> mObbVolumes;
-    std::list<std::shared_ptr<android::vold::VolumeBase>> mStubVolumes;
     std::list<std::shared_ptr<android::vold::VolumeBase>> mInternalEmulatedVolumes;
 
     std::unordered_map<userid_t, int> mAddedUsers;
@@ -212,8 +228,11 @@ class VolumeManager {
     std::shared_ptr<android::vold::VolumeBase> mPrimary;
 
     int mNextObbId;
-    int mNextStubVolumeId;
+    int mNextStubId;
     bool mSecureKeyguardShowing;
+
+    // Set of all user id that fuse is ready to use.
+    std::unordered_set<userid_t> mFuseMountedUsers;
 };
 
 #endif
