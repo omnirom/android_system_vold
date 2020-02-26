@@ -158,7 +158,24 @@ bool exportWrappedStorageKey(const KeyBuffer& ksKey, KeyBuffer* key) {
     if (!keystore) return false;
     std::string key_temp;
 
-    if (!keystore.exportKey(ksKey, &key_temp)) return false;
+    auto ret = keystore.exportKey(ksKey, &key_temp);
+    if (ret != km::ErrorCode::OK) {
+        if (ret == km::ErrorCode::KEY_REQUIRES_UPGRADE) {
+           // TODO(b/187304488): Re-land the below logic. (keystore.upgradeKey() was removed)
+           return false;
+           /*
+           std::string kmKeyStr(reinterpret_cast<const char*>(ksKey.data()), ksKey.size());
+           std::string Keystr;
+           if (!keystore.upgradeKey(kmKeyStr, km::AuthorizationSet(), &Keystr)) return false;
+           KeyBuffer upgradedKey = KeyBuffer(Keystr.size());
+           memcpy(reinterpret_cast<void*>(upgradedKey.data()), Keystr.c_str(), upgradedKey.size());
+           ret = keystore.exportKey(upgradedKey, &key_temp);
+           if (ret != km::ErrorCode::OK) return false;
+           */
+        } else {
+           return false;
+        }
+    }
     *key = KeyBuffer(key_temp.size());
     memcpy(reinterpret_cast<void*>(key->data()), key_temp.c_str(), key->size());
     return true;
