@@ -19,7 +19,6 @@
 
 #include "KeyBuffer.h"
 #include "KeyStorage.h"
-#include "Keymaster.h"
 
 #include <fscrypt/fscrypt.h>
 

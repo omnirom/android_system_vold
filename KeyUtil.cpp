@@ -34,10 +34,6 @@
 #include "KeyStorage.h"
 #include "Utils.h"
 
-#define MAX_USER_ID 0xFFFFFFFF
-
-using android::hardware::keymaster::V4_0::KeyFormat;
-using android::vold::KeyType;
 namespace android {
 namespace vold {
 
