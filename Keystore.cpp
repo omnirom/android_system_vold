@@ -150,8 +150,8 @@ bool Keystore::generateKey(const km::AuthorizationSet& inParams, std::string* ke
     return true;
 }
 
-bool Keystore::exportKey(const KeyBuffer& ksKey, std::string* key) {
-    bool ret = false;
+km::ErrorCode Keystore::exportKey(const KeyBuffer& ksKey, std::string* key) {
+    km::ErrorCode ret = km::ErrorCode::UNKNOWN_ERROR;
     ks2::KeyDescriptor storageKey = {
             .domain = ks2::Domain::BLOB,
             .alias = std::nullopt,
@@ -174,7 +174,7 @@ bool Keystore::exportKey(const KeyBuffer& ksKey, std::string* key) {
     // using the original blobs for TAG_STORAGE_KEY keys.  If KeyMint "upgrades"
     // them anyway, then they'll just get re-upgraded before each use.
 
-    ret = true;
+    ret = km::ErrorCode::OK;
 out:
     zeroize_vector(ephemeral_key_response.ephemeralKey);
     zeroize_vector(storageKey.blob.value());
