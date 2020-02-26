@@ -142,35 +142,6 @@ static void commit_key(const std::string& dir) {
     LOG(INFO) << "Old Key deleted: " << dir;
 }
 
-static bool retrieveMetadataKey(bool create_if_absent, const std::string& key_path,
-                                const std::string& tmp_path, KeyBuffer* key, bool keepOld) {
-    if (pathExists(key_path)) {
-        LOG(DEBUG) << "Key exists, using: " << key_path;
-        if (!retrieveKey(key_path, kEmptyAuthentication, key, keepOld)) return false;
-    } else {
-        if (!create_if_absent) {
-            LOG(ERROR) << "No key found in " << key_path;
-            return false;
-        }
-        LOG(INFO) << "Creating new key in " << key_path;
-        if (is_metadata_wrapped_key_supported()) {
-            if(!generateWrappedStorageKey(key)) return false;
-        } else {
-            if (!randomKey(key)) return false;
-        }
-        if (!storeKeyAtomically(key_path, tmp_path, kEmptyAuthentication, *key)) return false;
-    }
-    if (is_metadata_wrapped_key_supported()) {
-        KeyBuffer ephemeral_wrapped_key;
-        if (!exportWrappedStorageKey(*key, &ephemeral_wrapped_key)) {
-            LOG(ERROR) << "Failed to export key for generated key";
-            return false;
-        }
-        *key = std::move(ephemeral_wrapped_key);
-    }
-    return true;
-}
-
 static bool read_key(const std::string& metadata_key_dir, const KeyGeneration& gen,
                      KeyBuffer* key) {
     if (metadata_key_dir.empty()) {
