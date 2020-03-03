@@ -17,9 +17,8 @@
 #ifndef ANDROID_VOLD_KEYSTORAGE_H
 #define ANDROID_VOLD_KEYSTORAGE_H
 
-#include "Keymaster.h"
 #include "KeyBuffer.h"
-#include <cutils/multiuser.h>
+
 #include <string>
 
 namespace android {
