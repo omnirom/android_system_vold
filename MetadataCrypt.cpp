@@ -287,11 +287,6 @@ bool fscrypt_mount_metadata_encrypted(const std::string& blk_device, const std::
         LOG(ERROR) << "Failed to get data_rec for " << mount_point;
         return false;
     }
-    if (blk_device != data_rec->blk_device) {
-        LOG(ERROR) << "blk_device " << blk_device << " does not match fstab entry "
-                   << data_rec->blk_device << " for " << mount_point;
-        return false;
-    }
 
     bool is_legacy;
     if (!DmTargetDefaultKey::IsLegacy(&is_legacy)) return false;
@@ -320,8 +315,7 @@ bool fscrypt_mount_metadata_encrypted(const std::string& blk_device, const std::
 
     std::string crypto_blkdev;
     uint64_t nr_sec;
-    if (!create_crypto_blk_dev(kDmNameUserdata, data_rec->blk_device, key, options, &crypto_blkdev,
-                               &nr_sec))
+    if (!create_crypto_blk_dev(kDmNameUserdata, blk_device, key, options, &crypto_blkdev, &nr_sec))
         return false;
 
     // FIXME handle the corrupt case
@@ -342,7 +336,7 @@ bool fscrypt_mount_metadata_encrypted(const std::string& blk_device, const std::
     }
 
     LOG(DEBUG) << "Mounting metadata-encrypted filesystem:" << mount_point;
-    mount_via_fs_mgr(data_rec->mount_point.c_str(), crypto_blkdev.c_str());
+    mount_via_fs_mgr(mount_point.c_str(), crypto_blkdev.c_str());
     return true;
 }
 
