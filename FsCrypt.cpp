@@ -88,8 +88,6 @@ const std::string prepare_subdirs_path = "/system/bin/vold_prepare_subdirs";
 const std::string systemwide_volume_key_dir =
     std::string() + DATA_MNT_POINT + "/misc/vold/volume_keys";
 
-bool s_systemwide_keys_initialized = false;
-
 // Some users are ephemeral, don't try to wipe their keys from disk
 std::set<userid_t> s_ephemeral_users;
 
@@ -372,28 +370,37 @@ static bool load_all_de_keys() {
             continue;
         }
         userid_t user_id = std::stoi(entry->d_name);
-        if (s_de_policies.count(user_id) == 0) {
-            auto key_path = de_dir + "/" + entry->d_name;
-            KeyBuffer de_key;
-            if (!retrieveKey(key_path, kEmptyAuthentication, &de_key)) return false;
-            EncryptionPolicy de_policy;
-            if (!install_storage_key(DATA_MNT_POINT, options, de_key, &de_policy)) return false;
-            s_de_policies[user_id] = de_policy;
-            LOG(DEBUG) << "Installed de key for user " << user_id;
+        auto key_path = de_dir + "/" + entry->d_name;
+        KeyBuffer de_key;
+        if (!retrieveKey(key_path, kEmptyAuthentication, &de_key)) return false;
+        EncryptionPolicy de_policy;
+        if (!install_storage_key(DATA_MNT_POINT, options, de_key, &de_policy)) return false;
+        auto ret = s_de_policies.insert({user_id, de_policy});
+        if (!ret.second && ret.first->second != de_policy) {
+            LOG(ERROR) << "DE policy for user" << user_id << " changed";
+            return false;
         }
+        LOG(DEBUG) << "Installed de key for user " << user_id;
     }
     // fscrypt:TODO: go through all DE directories, ensure that all user dirs have the
     // correct policy set on them, and that no rogue ones exist.
     return true;
 }
 
+// Attempt to reinstall CE keys for users that we think are unlocked.
+static bool try_reload_ce_keys() {
+    for (const auto& it : s_ce_policies) {
+        if (!android::vold::reloadKeyFromSessionKeyring(DATA_MNT_POINT, it.second)) {
+            LOG(ERROR) << "Failed to load CE key from session keyring for user " << it.first;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool fscrypt_initialize_systemwide_keys() {
     LOG(INFO) << "fscrypt_initialize_systemwide_keys";
 
-    if (s_systemwide_keys_initialized) {
-        LOG(INFO) << "Already initialized";
-        return true;
-    }
     EncryptionOptions options;
     if (!get_data_file_encryption_options(&options)) return false;
 
@@ -427,7 +434,6 @@ bool fscrypt_initialize_systemwide_keys() {
     LOG(INFO) << "Wrote per boot key reference to:" << per_boot_ref_filename;
 
     if (!android::vold::FsyncDirectory(device_key_dir)) return false;
-    s_systemwide_keys_initialized = true;
     return true;
 }
 
@@ -456,6 +462,13 @@ bool fscrypt_init_user0() {
     // restore user data directories to known-good state.
     if (!fscrypt_is_native() && !fscrypt_is_emulated()) {
         fscrypt_unlock_user_key(0, 0, "!", "!");
+    }
+
+    // In some scenarios (e.g. userspace reboot) we might unmount userdata
+    // without doing a hard reboot. If CE keys were stored in fs keyring then
+    // they will be lost after unmount. Attempt to re-install them.
+    if (fscrypt_is_native() && android::vold::isFsKeyringSupported()) {
+        if (!try_reload_ce_keys()) return false;
     }
 
     return true;
@@ -822,14 +835,6 @@ bool fscrypt_prepare_user_storage(const std::string& volume_uuid, userid_t user_
             if (!prepare_dir(vendor_ce_path, 0771, AID_ROOT, AID_ROOT)) return false;
         }
         if (!prepare_dir(media_ce_path, 0770, AID_MEDIA_RW, AID_MEDIA_RW)) return false;
-        // Setup quota project ID and inheritance policy
-        if (!IsFilesystemSupported("sdcardfs")) {
-            if (SetQuotaInherit(media_ce_path) != 0) return false;
-            if (SetQuotaProjectId(media_ce_path,
-                                  multiuser_get_uid(user_id, PROJECT_ID_EXT_DEFAULT)) != 0) {
-                return false;
-            }
-        }
 
         if (!prepare_dir(user_ce_path, 0771, AID_SYSTEM, AID_SYSTEM)) return false;
 
