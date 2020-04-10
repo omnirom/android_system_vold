@@ -53,7 +53,7 @@ static const char* kSgdiskToken = " \t\n";
 
 static const char* kSysfsLoopMaxMinors = "/sys/module/loop/parameters/max_part";
 static const char* kSysfsMmcMaxMinorsDeprecated = "/sys/module/mmcblk/parameters/perdev_minors";
-static const char* kSysfsMmcMaxMinors = "/sys/module/mmc_block/parameters/perdev_minors";
+static const char* kSysfsMmcMaxMinors = "/sys/module/mmc_block/parameters/mmcblk.perdev_minors";
 
 static const unsigned int kMajorBlockLoop = 7;
 static const unsigned int kMajorBlockScsiA = 8;
