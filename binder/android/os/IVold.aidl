@@ -53,6 +53,7 @@ interface IVold {
                      IVoldTaskListener listener);
 
     void remountUid(int uid, int remountMode);
+    void remountAppStorageDirs(int uid, int pid, in @utf8InCpp String[] packageNames);
 
     void setupAppDir(@utf8InCpp String path, int appUid);
     void fixupAppDir(@utf8InCpp String path, int appUid);
@@ -134,6 +135,7 @@ interface IVold {
     boolean incFsEnabled();
     IncrementalFileSystemControlParcel mountIncFs(@utf8InCpp String backingPath, @utf8InCpp String targetDir, int flags);
     void unmountIncFs(@utf8InCpp String dir);
+    void setIncFsMountOptions(in IncrementalFileSystemControlParcel control, boolean enableReadLogs);
     void bindMount(@utf8InCpp String sourceDir, @utf8InCpp String targetDir);
 
     const int ENCRYPTION_FLAG_NO_UI = 4;

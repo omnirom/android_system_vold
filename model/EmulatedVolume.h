@@ -41,12 +41,14 @@ class EmulatedVolume : public VolumeBase {
     EmulatedVolume(const std::string& rawPath, dev_t device, const std::string& fsUuid, int userId);
     virtual ~EmulatedVolume();
     std::string getRootPath() const override;
+    bool isFuseMounted() const { return mFuseMounted; }
 
   protected:
     status_t doMount() override;
     status_t doUnmount() override;
 
   private:
+    status_t unmountSdcardFs();
     status_t mountFuseBindMounts();
     status_t unmountFuseBindMounts();
 

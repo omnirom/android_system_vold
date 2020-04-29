@@ -22,6 +22,7 @@
 
 #include <android-base/logging.h>
 #include <android-base/properties.h>
+#include <android-base/scopeguard.h>
 #include <android-base/stringprintf.h>
 #include <cutils/fs.h>
 #include <private/android_filesystem_config.h>
@@ -76,13 +77,15 @@ std::string EmulatedVolume::getLabel() {
 }
 
 // Creates a bind mount from source to target
-static status_t doFuseBindMount(const std::string& source, const std::string& target) {
+static status_t doFuseBindMount(const std::string& source, const std::string& target,
+                                std::list<std::string>& pathsToUnmount) {
     LOG(INFO) << "Bind mounting " << source << " on " << target;
     auto status = BindMount(source, target);
     if (status != OK) {
         return status;
     }
     LOG(INFO) << "Bind mounted " << source << " on " << target;
+    pathsToUnmount.push_front(target);
     return OK;
 }
 
@@ -90,6 +93,21 @@ status_t EmulatedVolume::mountFuseBindMounts() {
     std::string androidSource;
     std::string label = getLabel();
     int userId = getMountUserId();
+    std::list<std::string> pathsToUnmount;
+
+    auto unmounter = [&]() {
+        LOG(INFO) << "mountFuseBindMounts() unmount scope_guard running";
+        for (const auto& path : pathsToUnmount) {
+            LOG(INFO) << "Unmounting " << path;
+            auto status = UnmountTree(path);
+            if (status != OK) {
+                LOG(INFO) << "Failed to unmount " << path;
+            } else {
+                LOG(INFO) << "Unmounted " << path;
+            }
+        }
+    };
+    auto unmount_guard = android::base::make_scope_guard(unmounter);
 
     if (mUseSdcardFs) {
         androidSource = StringPrintf("/mnt/runtime/default/%s/%d/Android", label.c_str(), userId);
@@ -101,43 +119,39 @@ status_t EmulatedVolume::mountFuseBindMounts() {
     // When app data isolation is enabled, obb/ will be mounted per app, otherwise we should
     // bind mount the whole Android/ to speed up reading.
     if (!mAppDataIsolationEnabled) {
-        std::string androidTarget(
-            StringPrintf("/mnt/user/%d/%s/%d/Android", userId, label.c_str(), userId));
-        status = doFuseBindMount(androidSource, androidTarget);
+        std::string androidDataSource = StringPrintf("%s/data", androidSource.c_str());
+        std::string androidDataTarget(
+                StringPrintf("/mnt/user/%d/%s/%d/Android/data", userId, label.c_str(), userId));
+        status = doFuseBindMount(androidDataSource, androidDataTarget, pathsToUnmount);
+        if (status != OK) {
+            return status;
+        }
+
+        std::string androidObbSource = StringPrintf("%s/obb", androidSource.c_str());
+        std::string androidObbTarget(
+                StringPrintf("/mnt/user/%d/%s/%d/Android/obb", userId, label.c_str(), userId));
+        status = doFuseBindMount(androidObbSource, androidObbTarget, pathsToUnmount);
+        if (status != OK) {
+            return status;
+        }
     }
 
-    if (status != OK) {
-        return status;
-    }
     // Installers get the same view as all other apps, with the sole exception that the
     // OBB dirs (Android/obb) are writable to them. On sdcardfs devices, this requires
     // a special bind mount, since app-private and OBB dirs share the same GID, but we
     // only want to give access to the latter.
-    if (!mUseSdcardFs) {
-        return OK;
-    }
-    std::string installerSource(
-            StringPrintf("/mnt/runtime/write/%s/%d/Android/obb", label.c_str(), userId));
-    std::string installerTarget(
-            StringPrintf("/mnt/installer/%d/%s/%d/Android/obb", userId, label.c_str(), userId));
+    if (mUseSdcardFs) {
+        std::string installerSource(
+                StringPrintf("/mnt/runtime/write/%s/%d/Android/obb", label.c_str(), userId));
+        std::string installerTarget(
+                StringPrintf("/mnt/installer/%d/%s/%d/Android/obb", userId, label.c_str(), userId));
 
-    status = doFuseBindMount(installerSource, installerTarget);
-    if (status != OK) {
-        return status;
-    }
-
-    if (mAppDataIsolationEnabled) {
-        // Starting from now, fuse is running, and zygote will bind app obb & data directory
-        if (!VolumeManager::Instance()->addFuseMountedUser(userId)) {
-            return UNKNOWN_ERROR;
+        status = doFuseBindMount(installerSource, installerTarget, pathsToUnmount);
+        if (status != OK) {
+            return status;
         }
-
-        // As all new processes created by zygote will bind app obb data directory, we just need
-        // to have a snapshot of all existing processes and see if any existing process needs to
-        // remount obb data directory.
-        VolumeManager::Instance()->remountAppStorageDirs(userId);
     }
-
+    unmount_guard.Disable();
     return OK;
 }
 
@@ -161,16 +175,50 @@ status_t EmulatedVolume::unmountFuseBindMounts() {
         std::string appObbDir(StringPrintf("%s/%d/Android/obb", getPath().c_str(), userId));
         KillProcessesWithMountPrefix(appObbDir);
     } else {
-        std::string androidTarget(
-                StringPrintf("/mnt/user/%d/%s/%d/Android", userId, label.c_str(), userId));
+        std::string androidDataTarget(
+                StringPrintf("/mnt/user/%d/%s/%d/Android/data", userId, label.c_str(), userId));
 
-        LOG(INFO) << "Unmounting " << androidTarget;
-        auto status = UnmountTree(androidTarget);
+        LOG(INFO) << "Unmounting " << androidDataTarget;
+        auto status = UnmountTree(androidDataTarget);
         if (status != OK) {
             return status;
         }
-        LOG(INFO) << "Unmounted " << androidTarget;
+        LOG(INFO) << "Unmounted " << androidDataTarget;
+
+        std::string androidObbTarget(
+                StringPrintf("/mnt/user/%d/%s/%d/Android/obb", userId, label.c_str(), userId));
+
+        LOG(INFO) << "Unmounting " << androidObbTarget;
+        status = UnmountTree(androidObbTarget);
+        if (status != OK) {
+            return status;
+        }
+        LOG(INFO) << "Unmounted " << androidObbTarget;
     }
+    return OK;
+}
+
+status_t EmulatedVolume::unmountSdcardFs() {
+    if (!mUseSdcardFs || getMountUserId() != 0) {
+        // For sdcardfs, only unmount for user 0, since user 0 will always be running
+        // and the paths don't change for different users.
+        return OK;
+    }
+
+    ForceUnmount(mSdcardFsDefault);
+    ForceUnmount(mSdcardFsRead);
+    ForceUnmount(mSdcardFsWrite);
+    ForceUnmount(mSdcardFsFull);
+
+    rmdir(mSdcardFsDefault.c_str());
+    rmdir(mSdcardFsRead.c_str());
+    rmdir(mSdcardFsWrite.c_str());
+    rmdir(mSdcardFsFull.c_str());
+
+    mSdcardFsDefault.clear();
+    mSdcardFsRead.clear();
+    mSdcardFsWrite.clear();
+    mSdcardFsFull.clear();
 
     return OK;
 }
@@ -245,7 +293,15 @@ status_t EmulatedVolume::doMount() {
         TEMP_FAILURE_RETRY(waitpid(sdcardFsPid, nullptr, 0));
         sdcardFsPid = 0;
     }
+
     if (isFuse && isVisible) {
+        // Make sure we unmount sdcardfs if we bail out with an error below
+        auto sdcardfs_unmounter = [&]() {
+            LOG(INFO) << "sdcardfs_unmounter scope_guard running";
+            unmountSdcardFs();
+        };
+        auto sdcardfs_guard = android::base::make_scope_guard(sdcardfs_unmounter);
+
         LOG(INFO) << "Mounting emulated fuse volume";
         android::base::unique_fd fd;
         int user_id = getMountUserId();
@@ -265,13 +321,21 @@ status_t EmulatedVolume::doMount() {
         }
 
         mFuseMounted = true;
+        auto fuse_unmounter = [&]() {
+            LOG(INFO) << "fuse_unmounter scope_guard running";
+            fd.reset();
+            if (UnmountUserFuse(user_id, getInternalPath(), label) != OK) {
+                PLOG(INFO) << "UnmountUserFuse failed on emulated fuse volume";
+            }
+            mFuseMounted = false;
+        };
+        auto fuse_guard = android::base::make_scope_guard(fuse_unmounter);
+
         auto callback = getMountCallback();
         if (callback) {
             bool is_ready = false;
             callback->onVolumeChecking(std::move(fd), getPath(), getInternalPath(), &is_ready);
             if (!is_ready) {
-                fd.reset();
-                doUnmount();
                 return -EIO;
             }
         }
@@ -279,10 +343,12 @@ status_t EmulatedVolume::doMount() {
         // Only do the bind-mounts when we know for sure the FUSE daemon can resolve the path.
         res = mountFuseBindMounts();
         if (res != OK) {
-            fd.reset();
-            doUnmount();
+            return res;
         }
-        return res;
+
+        // All mounts where successful, disable scope guards
+        sdcardfs_guard.Disable();
+        fuse_guard.Disable();
     }
 
     return OK;
@@ -308,15 +374,10 @@ status_t EmulatedVolume::doUnmount() {
     if (mFuseMounted) {
         std::string label = getLabel();
 
-        // Update fuse mounted record
-        if (mAppDataIsolationEnabled &&
-                !VolumeManager::Instance()->removeFuseMountedUser(userId)) {
-            return UNKNOWN_ERROR;
-        }
-
         // Ignoring unmount return status because we do want to try to unmount
         // the rest cleanly.
         unmountFuseBindMounts();
+
         if (UnmountUserFuse(userId, getInternalPath(), label) != OK) {
             PLOG(INFO) << "UnmountUserFuse failed on emulated fuse volume";
             return -errno;
@@ -324,28 +385,8 @@ status_t EmulatedVolume::doUnmount() {
 
         mFuseMounted = false;
     }
-    if (getMountUserId() != 0 || !mUseSdcardFs) {
-        // For sdcardfs, only unmount for user 0, since user 0 will always be running
-        // and the paths don't change for different users.
-        return OK;
-    }
 
-    ForceUnmount(mSdcardFsDefault);
-    ForceUnmount(mSdcardFsRead);
-    ForceUnmount(mSdcardFsWrite);
-    ForceUnmount(mSdcardFsFull);
-
-    rmdir(mSdcardFsDefault.c_str());
-    rmdir(mSdcardFsRead.c_str());
-    rmdir(mSdcardFsWrite.c_str());
-    rmdir(mSdcardFsFull.c_str());
-
-    mSdcardFsDefault.clear();
-    mSdcardFsRead.clear();
-    mSdcardFsWrite.clear();
-    mSdcardFsFull.clear();
-
-    return OK;
+    return unmountSdcardFs();
 }
 
 std::string EmulatedVolume::getRootPath() const {

@@ -64,6 +64,8 @@ class VoldNativeService : public BinderService<VoldNativeService>, public os::Bn
                                const android::sp<android::os::IVoldTaskListener>& listener);
 
     binder::Status remountUid(int32_t uid, int32_t remountMode);
+    binder::Status remountAppStorageDirs(int uid, int pid,
+                               const std::vector<std::string>& packageNames);
 
     binder::Status setupAppDir(const std::string& path, int32_t appUid);
     binder::Status fixupAppDir(const std::string& path, int32_t appUid);
@@ -154,6 +156,9 @@ class VoldNativeService : public BinderService<VoldNativeService>, public os::Bn
             const std::string& backingPath, const std::string& targetDir, int32_t flags,
             ::android::os::incremental::IncrementalFileSystemControlParcel* _aidl_return) override;
     binder::Status unmountIncFs(const std::string& dir) override;
+    binder::Status setIncFsMountOptions(
+            const ::android::os::incremental::IncrementalFileSystemControlParcel& control,
+            bool enableReadLogs) override;
     binder::Status bindMount(const std::string& sourceDir, const std::string& targetDir) override;
 };
 
