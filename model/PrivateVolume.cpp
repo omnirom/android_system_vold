@@ -200,6 +200,10 @@ status_t PrivateVolume::doMount() {
         return -EIO;
     }
 
+    return OK;
+}
+
+void PrivateVolume::doPostMount() {
     auto vol_manager = VolumeManager::Instance();
     std::string mediaPath(mPath + "/media");
 
@@ -212,8 +216,6 @@ status_t PrivateVolume::doMount() {
         addVolume(vol);
         vol->create();
     }
-
-    return OK;
 }
 
 status_t PrivateVolume::doUnmount() {
