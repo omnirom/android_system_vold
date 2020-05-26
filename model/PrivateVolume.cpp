@@ -42,6 +42,7 @@
 #define RETRY_MOUNT_DELAY_SECONDS 1
 
 using android::base::StringPrintf;
+using android::vold::IsVirtioBlkDevice;
 
 namespace android {
 namespace vold {
@@ -233,9 +234,10 @@ status_t PrivateVolume::doFormat(const std::string& fsType) {
     if (fsType == "auto") {
         // For now, assume that all MMC devices are flash-based SD cards, and
         // give everyone else ext4 because sysfs rotational isn't reliable.
-        // Additionally, prefer f2fs for loop-bases devices
-        if ((major(mRawDevice) == kMajorBlockMmc || major(mRawDevice) == kMajorBlockLoop) &&
-            f2fs::IsSupported()) {
+        // Additionally, prefer f2fs for loop-based devices
+        if ((major(mRawDevice) == kMajorBlockMmc ||
+             major(mRawDevice) == kMajorBlockLoop ||
+             IsVirtioBlkDevice(major(mRawDevice))) && f2fs::IsSupported()) {
             resolvedFsType = "f2fs";
         } else {
             resolvedFsType = "ext4";
