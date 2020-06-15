@@ -36,6 +36,7 @@ namespace vold {
 
 static const char* kPropFuse = "persist.sys.fuse";
 static const char* kVoldAppDataIsolationEnabled = "persist.sys.vold_app_data_isolation_enabled";
+static const char* kExternalStorageSdcardfs = "external_storage.sdcardfs.enabled";
 
 /* SELinux contexts used depending on the block device type */
 extern security_context_t sBlkidContext;
@@ -48,6 +49,8 @@ extern bool sSleepOnUnmount;
 
 status_t CreateDeviceNode(const std::string& path, dev_t dev);
 status_t DestroyDeviceNode(const std::string& path);
+
+status_t AbortFuseConnections();
 
 int SetQuotaInherit(const std::string& path);
 int SetQuotaProjectId(const std::string& path, long projectId);
@@ -124,6 +127,7 @@ uint64_t GetFreeBytes(const std::string& path);
 uint64_t GetTreeBytes(const std::string& path);
 
 bool IsFilesystemSupported(const std::string& fsType);
+bool IsSdcardfsUsed();
 bool IsFuseDaemon(const pid_t pid);
 
 /* Wipes contents of block device at given path */
@@ -155,8 +159,8 @@ status_t RestoreconRecursive(const std::string& path);
 // TODO: promote to android::base
 bool Readlinkat(int dirfd, const std::string& path, std::string* result);
 
-/* Checks if Android is running in QEMU */
-bool IsRunningInEmulator();
+// Handles dynamic major assignment for virtio-block
+bool IsVirtioBlkDevice(unsigned int major);
 
 status_t UnmountTreeWithPrefix(const std::string& prefix);
 status_t UnmountTree(const std::string& mountPoint);

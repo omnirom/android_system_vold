@@ -19,6 +19,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <mntent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,6 +83,8 @@ using android::vold::DeleteDirContents;
 using android::vold::DeleteDirContentsAndDir;
 using android::vold::EnsureDirExists;
 using android::vold::IsFilesystemSupported;
+using android::vold::IsSdcardfsUsed;
+using android::vold::IsVirtioBlkDevice;
 using android::vold::PrepareAndroidDirs;
 using android::vold::PrepareAppDirFromRoot;
 using android::vold::PrivateVolume;
@@ -102,8 +105,6 @@ static const std::string kEmptyString("");
 static const unsigned int kSizeVirtualDisk = 536870912;
 
 static const unsigned int kMajorBlockMmc = 179;
-static const unsigned int kMajorBlockExperimentalMin = 240;
-static const unsigned int kMajorBlockExperimentalMax = 254;
 
 using ScanProcCallback = bool(*)(uid_t uid, pid_t pid, int nsFd, const char* name, void* params);
 
@@ -230,12 +231,10 @@ void VolumeManager::handleBlockEvent(NetlinkEvent* evt) {
             for (const auto& source : mDiskSources) {
                 if (source->matches(eventPath)) {
                     // For now, assume that MMC and virtio-blk (the latter is
-                    // emulator-specific; see Disk.cpp for details) devices are SD,
-                    // and that everything else is USB
+                    // specific to virtual platforms; see Utils.cpp for details)
+                    // devices are SD, and that everything else is USB
                     int flags = source->getFlags();
-                    if (major == kMajorBlockMmc || (android::vold::IsRunningInEmulator() &&
-                                                    major >= (int)kMajorBlockExperimentalMin &&
-                                                    major <= (int)kMajorBlockExperimentalMax)) {
+                    if (major == kMajorBlockMmc || IsVirtioBlkDevice(major)) {
                         flags |= android::vold::Disk::Flags::kSd;
                     } else {
                         flags |= android::vold::Disk::Flags::kUsb;
@@ -739,8 +738,10 @@ int VolumeManager::remountUid(uid_t uid, int32_t mountMode) {
 }
 
 
-// Set the namespace the app process and remount its storage directories.
-static bool remountStorageDirs(int nsFd, const char* sources[], const char* targets[], int size) {
+// In each app's namespace, mount tmpfs on obb and data dir, and bind mount obb and data
+// package dirs.
+static bool remountStorageDirs(int nsFd, const char* android_data_dir, const char* android_obb_dir,
+        int uid, const char* sources[], const char* targets[], int size) {
     // This code is executed after a fork so it's very important that the set of
     // methods we call here is strictly limited.
     if (setns(nsFd, CLONE_NEWNS) != 0) {
@@ -748,7 +749,27 @@ static bool remountStorageDirs(int nsFd, const char* sources[], const char* targ
         return false;
     }
 
+    // Mount tmpfs on Android/data and Android/obb
+    if (TEMP_FAILURE_RETRY(mount("tmpfs", android_data_dir, "tmpfs",
+            MS_NOSUID | MS_NODEV | MS_NOEXEC, "uid=0,gid=0,mode=0751")) == -1) {
+        async_safe_format_log(ANDROID_LOG_ERROR, "vold", "Failed to mount tmpfs to %s :%s",
+                        android_data_dir, strerror(errno));
+        return false;
+    }
+    if (TEMP_FAILURE_RETRY(mount("tmpfs", android_obb_dir, "tmpfs",
+            MS_NOSUID | MS_NODEV | MS_NOEXEC, "uid=0,gid=0,mode=0751")) == -1) {
+        async_safe_format_log(ANDROID_LOG_ERROR, "vold", "Failed to mount tmpfs to %s :%s",
+                android_obb_dir, strerror(errno));
+        return false;
+    }
+
     for (int i = 0; i < size; i++) {
+        // Create package dir and bind mount it to the actual one.
+        if (TEMP_FAILURE_RETRY(mkdir(targets[i], 0700)) == -1) {
+            async_safe_format_log(ANDROID_LOG_ERROR, "vold", "Failed to mkdir %s %s",
+                    targets[i], strerror(errno));
+            return false;
+        }
         if (TEMP_FAILURE_RETRY(mount(sources[i], targets[i], NULL, MS_BIND | MS_REC, NULL)) == -1) {
             async_safe_format_log(ANDROID_LOG_ERROR, "vold", "Failed to mount %s to %s :%s",
                                   sources[i], targets[i], strerror(errno));
@@ -760,7 +781,7 @@ static bool remountStorageDirs(int nsFd, const char* sources[], const char* targ
 
 static std::string getStorageDirSrc(userid_t userId, const std::string& dirName,
         const std::string& packageName) {
-    if (IsFilesystemSupported("sdcardfs")) {
+    if (IsSdcardfsUsed()) {
         return StringPrintf("/mnt/runtime/default/emulated/%d/%s/%s",
                 userId, dirName.c_str(), packageName.c_str());
     } else {
@@ -823,11 +844,17 @@ bool VolumeManager::forkAndRemountStorage(int uid, int pid,
         }
     }
 
+    char android_data_dir[PATH_MAX];
+    char android_obb_dir[PATH_MAX];
+    snprintf(android_data_dir, PATH_MAX, "/storage/emulated/%d/Android/data", userId);
+    snprintf(android_obb_dir, PATH_MAX, "/storage/emulated/%d/Android/obb", userId);
+
     pid_t child;
     // Fork a child to mount Android/obb android Android/data dirs, as we don't want it to affect
     // original vold process mount namespace.
     if (!(child = fork())) {
-        if (remountStorageDirs(nsFd, sources_cstr, targets_cstr, size)) {
+        if (remountStorageDirs(nsFd, android_data_dir, android_obb_dir, uid,
+                sources_cstr, targets_cstr, size)) {
             _exit(0);
         } else {
             _exit(1);
@@ -878,6 +905,10 @@ int VolumeManager::remountAppStorageDirs(int uid, int pid,
     return 0;
 }
 
+int VolumeManager::abortFuse() {
+    return android::vold::AbortFuseConnections();
+}
+
 int VolumeManager::reset() {
     // Tear down all existing disks/volumes and start from a blank slate so
     // newly connected framework hears all events.
@@ -913,6 +944,7 @@ int VolumeManager::shutdown() {
     mDisks.clear();
     mPendingDisks.clear();
     android::vold::sSleepOnUnmount = true;
+
     return 0;
 }
 
@@ -1023,7 +1055,7 @@ int VolumeManager::setupAppDir(const std::string& path, int32_t appUid, bool fix
 }
 
 int VolumeManager::fixupAppDir(const std::string& path, int32_t appUid) {
-    if (IsFilesystemSupported("sdcardfs")) {
+    if (IsSdcardfsUsed()) {
         //sdcardfs magically does this for us
         return OK;
     }

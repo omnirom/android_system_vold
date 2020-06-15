@@ -77,6 +77,7 @@ bool sSleepOnUnmount = true;
 static const char* kBlkidPath = "/system/bin/blkid";
 static const char* kKeyPath = "/data/misc/vold";
 
+static const char* kProcDevices = "/proc/devices";
 static const char* kProcFilesystems = "/proc/filesystems";
 
 static const char* kAndroidDir = "/Android/";
@@ -131,7 +132,7 @@ status_t DestroyDeviceNode(const std::string& path) {
 
 // Sets a default ACL on the directory.
 int SetDefaultAcl(const std::string& path, mode_t mode, uid_t uid, gid_t gid) {
-    if (IsFilesystemSupported("sdcardfs")) {
+    if (IsSdcardfsUsed()) {
         // sdcardfs magically takes care of this
         return OK;
     }
@@ -226,7 +227,7 @@ int PrepareDirWithProjectId(const std::string& path, mode_t mode, uid_t uid, gid
         return ret;
     }
 
-    if (!IsFilesystemSupported("sdcardfs")) {
+    if (!IsSdcardfsUsed()) {
         ret = SetQuotaProjectId(path, projectId);
     }
 
@@ -254,7 +255,7 @@ static int FixupAppDir(const std::string& path, mode_t mode, uid_t uid, gid_t gi
             return ret;
         }
 
-        if (!IsFilesystemSupported("sdcardfs")) {
+        if (!IsSdcardfsUsed()) {
             ret = SetQuotaProjectId(itEntry.path(), projectId);
             if (ret != 0) {
                 return ret;
@@ -270,6 +271,7 @@ int PrepareAppDirFromRoot(const std::string& path, const std::string& root, int 
     long projectId;
     size_t pos;
     int ret = 0;
+    bool sdcardfsSupport = IsSdcardfsUsed();
 
     // Make sure the Android/ directories exist and are setup correctly
     ret = PrepareAndroidDirs(root);
@@ -290,17 +292,17 @@ int PrepareAppDirFromRoot(const std::string& path, const std::string& root, int 
     // Check that the next part matches one of the allowed Android/ dirs
     if (StartsWith(pathFromRoot, kAppDataDir)) {
         appDir = kAppDataDir;
-        if (!IsFilesystemSupported("sdcardfs")) {
+        if (!sdcardfsSupport) {
             gid = AID_EXT_DATA_RW;
         }
     } else if (StartsWith(pathFromRoot, kAppMediaDir)) {
         appDir = kAppMediaDir;
-        if (!IsFilesystemSupported("sdcardfs")) {
+        if (!sdcardfsSupport) {
             gid = AID_MEDIA_RW;
         }
     } else if (StartsWith(pathFromRoot, kAppObbDir)) {
         appDir = kAppObbDir;
-        if (!IsFilesystemSupported("sdcardfs")) {
+        if (!sdcardfsSupport) {
             gid = AID_EXT_OBB_RW;
         }
     } else {
@@ -367,7 +369,7 @@ int PrepareAppDirFromRoot(const std::string& path, const std::string& root, int 
                 return ret;
             }
 
-            if (!IsFilesystemSupported("sdcardfs")) {
+            if (!sdcardfsSupport) {
                 // Set project ID inheritance, so that future subdirectories inherit the
                 // same project ID
                 ret = SetQuotaInherit(pathToCreate);
@@ -942,6 +944,11 @@ bool IsFilesystemSupported(const std::string& fsType) {
     return supported.find(fsType + "\n") != std::string::npos;
 }
 
+bool IsSdcardfsUsed() {
+    return IsFilesystemSupported("sdcardfs") &&
+           base::GetBoolProperty(kExternalStorageSdcardfs, true);
+}
+
 status_t WipeBlockDevice(const std::string& path) {
     status_t res = -1;
     const char* c_path = path.c_str();
@@ -1103,8 +1110,39 @@ bool Readlinkat(int dirfd, const std::string& path, std::string* result) {
     }
 }
 
-bool IsRunningInEmulator() {
-    return android::base::GetBoolProperty("ro.kernel.qemu", false);
+static unsigned int GetMajorBlockVirtioBlk() {
+    std::string devices;
+    if (!ReadFileToString(kProcDevices, &devices)) {
+        PLOG(ERROR) << "Unable to open /proc/devices";
+        return 0;
+    }
+
+    bool blockSection = false;
+    for (auto line : android::base::Split(devices, "\n")) {
+        if (line == "Block devices:") {
+            blockSection = true;
+        } else if (line == "Character devices:") {
+            blockSection = false;
+        } else if (blockSection) {
+            auto tokens = android::base::Split(line, " ");
+            if (tokens.size() == 2 && tokens[1] == "virtblk") {
+                return std::stoul(tokens[0]);
+            }
+        }
+    }
+
+    return 0;
+}
+
+bool IsVirtioBlkDevice(unsigned int major) {
+    // Most virtualized platforms expose block devices with the virtio-blk
+    // block device driver. Unfortunately, this driver does not use a fixed
+    // major number, but relies on the kernel to assign one from a specific
+    // range of block majors, which are allocated for "LOCAL/EXPERIMENAL USE"
+    // per Documentation/devices.txt. This is true even for the latest Linux
+    // kernel (4.4; see init() in drivers/block/virtio_blk.c).
+    static unsigned int kMajorBlockVirtioBlk = GetMajorBlockVirtioBlk();
+    return kMajorBlockVirtioBlk && major == kMajorBlockVirtioBlk;
 }
 
 static status_t findMountPointsWithPrefix(const std::string& prefix,
@@ -1292,6 +1330,21 @@ bool writeStringToFile(const std::string& payload, const std::string& filename) 
     return true;
 }
 
+status_t AbortFuseConnections() {
+    namespace fs = std::filesystem;
+
+    for (const auto& itEntry : fs::directory_iterator("/sys/fs/fuse/connections")) {
+        std::string abortPath = itEntry.path().string() + "/abort";
+        LOG(DEBUG) << "Aborting fuse connection entry " << abortPath;
+        bool ret = writeStringToFile("1", abortPath);
+        if (!ret) {
+            LOG(WARNING) << "Failed to write to " << abortPath;
+        }
+    }
+
+    return OK;
+}
+
 status_t EnsureDirExists(const std::string& path, mode_t mode, uid_t uid, gid_t gid) {
     if (access(path.c_str(), F_OK) != 0) {
         PLOG(WARNING) << "Dir does not exist: " << path;
@@ -1394,7 +1447,7 @@ status_t MountUserFuse(userid_t user_id, const std::string& absolute_lower_path,
         return -errno;
     }
 
-    if (IsFilesystemSupported("sdcardfs")) {
+    if (IsSdcardfsUsed()) {
         std::string sdcardfs_path(
                 StringPrintf("/mnt/runtime/full/%s", relative_upper_path.c_str()));
 
@@ -1446,7 +1499,7 @@ status_t PrepareAndroidDirs(const std::string& volumeRoot) {
     std::string androidObbDir = volumeRoot + kAppObbDir;
     std::string androidMediaDir = volumeRoot + kAppMediaDir;
 
-    bool useSdcardFs = IsFilesystemSupported("sdcardfs");
+    bool useSdcardFs = IsSdcardfsUsed();
 
     // mode 0771 + sticky bit for inheriting GIDs
     mode_t mode = S_IRWXU | S_IRWXG | S_IXOTH | S_ISGID;
