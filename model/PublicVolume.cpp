@@ -238,6 +238,7 @@ status_t PublicVolume::doMount() {
 
         if (result != 0) {
             LOG(ERROR) << "Failed to mount public fuse volume";
+            doUnmount();
             return -result;
         }
 
@@ -247,9 +248,13 @@ status_t PublicVolume::doMount() {
             bool is_ready = false;
             callback->onVolumeChecking(std::move(fd), getPath(), getInternalPath(), &is_ready);
             if (!is_ready) {
+                LOG(ERROR) << "Failed to complete public volume mount";
+                doUnmount();
                 return -EIO;
             }
         }
+
+        ConfigureReadAheadForFuse(GetFuseMountPathForUser(user_id, stableName), 256u);
     }
 
     return OK;
