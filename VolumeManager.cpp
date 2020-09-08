@@ -108,6 +108,14 @@ static const unsigned int kMajorBlockMmc = 179;
 
 using ScanProcCallback = bool(*)(uid_t uid, pid_t pid, int nsFd, const char* name, void* params);
 
+#ifdef TARGET_INIT_VENDOR_LIB
+__attribute__ ((weak))
+bool vendor_vold_add_device(std::string devName)
+{
+    return true;
+}
+#endif
+
 VolumeManager* VolumeManager::sInstance = NULL;
 
 VolumeManager* VolumeManager::Instance() {
@@ -219,6 +227,8 @@ void VolumeManager::handleBlockEvent(NetlinkEvent* evt) {
 
     std::string eventPath(evt->findParam("DEVPATH") ? evt->findParam("DEVPATH") : "");
     std::string devType(evt->findParam("DEVTYPE") ? evt->findParam("DEVTYPE") : "");
+    std::string devName(evt->findParam("DEVNAME") ? evt->findParam("DEVNAME") : "");
+    std::string rootDev;
 
     if (devType != "disk") return;
 
@@ -239,6 +249,13 @@ void VolumeManager::handleBlockEvent(NetlinkEvent* evt) {
                     } else {
                         flags |= android::vold::Disk::Flags::kUsb;
                     }
+
+#ifdef TARGET_INIT_VENDOR_LIB
+                    // dont add this device as voldmanaged
+                    if (!vendor_vold_add_device(devName)) {
+                        break;
+                    }
+#endif
 
                     auto disk =
                         new android::vold::Disk(eventPath, device, source->getNickname(), flags);
