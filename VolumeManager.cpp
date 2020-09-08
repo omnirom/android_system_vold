@@ -71,6 +71,7 @@
 #include "model/StubVolume.h"
 
 using android::OK;
+using android::base::GetProperty;
 using android::base::GetBoolProperty;
 using android::base::StartsWith;
 using android::base::StringAppendF;
@@ -206,6 +207,7 @@ void VolumeManager::handleBlockEvent(NetlinkEvent* evt) {
 
     std::string eventPath(evt->findParam("DEVPATH") ? evt->findParam("DEVPATH") : "");
     std::string devType(evt->findParam("DEVTYPE") ? evt->findParam("DEVTYPE") : "");
+    std::string devName(evt->findParam("DEVNAME") ? evt->findParam("DEVNAME") : "");
 
     if (devType != "disk") return;
 
@@ -225,6 +227,17 @@ void VolumeManager::handleBlockEvent(NetlinkEvent* evt) {
                         flags |= android::vold::Disk::Flags::kSd;
                     } else {
                         flags |= android::vold::Disk::Flags::kUsb;
+                    }
+
+                    if (GetBoolProperty("sys.vendor.vold.skip_root_mnt", false)) {
+                        // dont add this device as voldmanaged
+                        std::string rootDev = GetProperty("dev.mnt.blk.root", "");
+                        if (!rootDev.empty()) {
+                            if (rootDev.find(devName) != std::string::npos) {
+                                LOG(INFO) << "VolumeManager: skip dev = " << devName << " it is the boot device";
+                                break;
+                            }
+                        }
                     }
 
                     auto disk =
