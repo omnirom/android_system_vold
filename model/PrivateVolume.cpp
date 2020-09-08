@@ -41,7 +41,11 @@
 #define RETRY_MOUNT_ATTEMPTS 10
 #define RETRY_MOUNT_DELAY_SECONDS 1
 
+#ifdef CONFIG_HW_DISK_ENCRYPTION
+constexpr int FS_AES_256_XTS_KEY_SIZE = 128;
+#else
 constexpr int FS_AES_256_XTS_KEY_SIZE = 64;
+#endif
 
 using android::base::StringPrintf;
 
@@ -74,7 +78,7 @@ status_t PrivateVolume::doCreate() {
     }
 
     if (is_ice_supported_external(mDiskFlags)) {
-        if (mKeyRaw.size() != FS_AES_256_XTS_KEY_SIZE) {
+        if (mKeyRaw.size() >= FS_AES_256_XTS_KEY_SIZE) {
             PLOG(ERROR) << getId() << " Keysize " << mKeyRaw.size()
                         << " does not match AES XTS keysize " << FS_AES_256_XTS_KEY_SIZE;
             return -EIO;

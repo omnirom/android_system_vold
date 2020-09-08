@@ -44,8 +44,12 @@
 #include <vector>
 
 #define MAX_USER_ID 0xFFFFFFFF
-constexpr int FS_AES_256_XTS_KEY_SIZE = 64;
 
+#ifdef CONFIG_HW_DISK_ENCRYPTION
+constexpr int FS_AES_256_XTS_KEY_SIZE = 128;
+#else
+constexpr int FS_AES_256_XTS_KEY_SIZE = 64;
+#endif
 using android::base::ReadFileToString;
 using android::base::StringPrintf;
 using android::base::WriteStringToFile;

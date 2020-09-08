@@ -37,11 +37,22 @@ using android::hardware::keymaster::V4_0::KeyFormat;
 using android::vold::KeyType;
 namespace android {
 namespace vold {
+#ifdef CONFIG_HW_DISK_ENCRYPTION
+constexpr int FS_AES_256_XTS_KEY_SIZE = 128;
+struct fscrypt_key_hwkm {
+        __u32 mode;
+        __u8 raw[FS_AES_256_XTS_KEY_SIZE];
+        __u32 size;
+};
 
+#else
 constexpr int FS_AES_256_XTS_KEY_SIZE = 64;
+#endif
+constexpr int FS_AES_256_CTS_KEY_SIZE = 32;
+constexpr int FS_AES_256_XTS_KEY_SIZE_RND = 64;
 
 bool randomKey(KeyBuffer* key) {
-    *key = KeyBuffer(FS_AES_256_XTS_KEY_SIZE);
+    *key = KeyBuffer(FS_AES_256_XTS_KEY_SIZE_RND);
     if (ReadRandomBytes(key->size(), key->data()) != 0) {
         // TODO status_t plays badly with PLOG, fix it.
         LOG(ERROR) << "Random read failed";
@@ -67,9 +78,12 @@ static std::string generateKeyRef(const uint8_t* key, int length) {
     static_assert(FS_KEY_DESCRIPTOR_SIZE <= SHA512_DIGEST_LENGTH, "Hash too short for descriptor");
     return std::string((char*)key_ref2, FS_KEY_DESCRIPTOR_SIZE);
 }
-
+#ifdef CONFIG_HW_DISK_ENCRYPTION
+static bool fillKey(const KeyBuffer& key, fscrypt_key_hwkm* fs_key) {
+#else
 static bool fillKey(const KeyBuffer& key, fscrypt_key* fs_key) {
-    if (key.size() != FS_AES_256_XTS_KEY_SIZE) {
+#endif
+    if (key.size() > FS_AES_256_XTS_KEY_SIZE) {
         LOG(ERROR) << "Wrong size key " << key.size();
         return false;
     }
@@ -106,15 +120,20 @@ static bool fscryptKeyring(key_serial_t* device_keyring) {
 // Return raw key reference for use in policy
 bool installKey(const KeyBuffer& key, std::string* raw_ref) {
     // Place fscrypt_key into automatically zeroing buffer.
+#ifdef CONFIG_HW_DISK_ENCRYPTION
+    KeyBuffer fsKeyBuffer(sizeof(fscrypt_key_hwkm));
+    fscrypt_key_hwkm& fs_key = *reinterpret_cast<fscrypt_key_hwkm*>(fsKeyBuffer.data());
+#else
     KeyBuffer fsKeyBuffer(sizeof(fscrypt_key));
     fscrypt_key& fs_key = *reinterpret_cast<fscrypt_key*>(fsKeyBuffer.data());
+#endif
 
     if (!fillKey(key, &fs_key)) return false;
     if (is_wrapped_key_supported()) {
         /* When wrapped key is supported, only the first 32 bytes are
            the same per boot. The second 32 bytes can change as the ephemeral
            key is different. */
-        *raw_ref = generateKeyRef(fs_key.raw, (fs_key.size)/2);
+        *raw_ref = generateKeyRef(fs_key.raw, FS_AES_256_CTS_KEY_SIZE);
     } else {
         *raw_ref = generateKeyRef(fs_key.raw, fs_key.size);
     }
@@ -122,14 +141,33 @@ bool installKey(const KeyBuffer& key, std::string* raw_ref) {
     if (!fscryptKeyring(&device_keyring)) return false;
     for (char const* const* name_prefix = NAME_PREFIXES; *name_prefix != nullptr; name_prefix++) {
         auto ref = keyname(*name_prefix, *raw_ref);
-        key_serial_t key_id =
-            add_key("logon", ref.c_str(), (void*)&fs_key, sizeof(fs_key), device_keyring);
-        if (key_id == -1) {
-            PLOG(ERROR) << "Failed to insert key into keyring " << device_keyring;
-            return false;
+        key_serial_t key_id = add_key("type_hwkm", NULL, NULL, 0, device_keyring);
+        if (errno != EAGAIN) {
+            PLOG(ERROR) << "Inserting using old mechanism " << " Error " << errno;
+            KeyBuffer fsKeyBuffer_tmp(sizeof(fscrypt_key));
+            fscrypt_key& fs_key_tmp = *reinterpret_cast<fscrypt_key*>(fsKeyBuffer_tmp.data());
+            fs_key_tmp.mode = FS_ENCRYPTION_MODE_AES_256_XTS;
+            fs_key_tmp.size = key.size();
+            memset(fs_key_tmp.raw, 0, sizeof(fs_key_tmp.raw));
+            memcpy(fs_key_tmp.raw, key.data(), sizeof(fs_key_tmp.raw));
+            key_id =
+                add_key("logon", ref.c_str(), (void*)&fs_key_tmp, sizeof(fs_key_tmp), device_keyring);
+            if (key_id == -1) {
+                PLOG(ERROR) << "Failed to insert key into keyring " << device_keyring;
+                return false;
+            }
         }
+	else {
+            PLOG(ERROR) << "Inserting using hkm mechanism ";
+            key_id =
+                add_key("logon", ref.c_str(), (void*)&fs_key, sizeof(fs_key), device_keyring);
+            if (key_id == -1) {
+                PLOG(ERROR) << "Failed to insert key into keyring " << device_keyring;
+                return false;
+            }
+	}
         LOG(DEBUG) << "Added key " << key_id << " (" << ref << ") to keyring " << device_keyring
-                   << " in process " << getpid();
+                   << " in process " << getpid() << "key size" << key.size();
     }
     return true;
 }
