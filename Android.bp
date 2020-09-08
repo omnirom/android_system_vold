@@ -108,6 +108,7 @@ cc_library_static {
     defaults: [
         "vold_default_flags",
         "vold_default_libs",
+        "vendor_vold_defaults",
     ],
 
     srcs: [
@@ -177,11 +178,26 @@ cc_library_static {
     ],
 }
 
+cc_library_static {
+    name: "vendor_vold",
+    recovery_available: true,
+    srcs: [
+        "vendor_vold.cpp",
+    ],
+    shared_libs: [
+        "libbase",
+    ],
+    cflags: [
+        "-Wno-unused-parameter",
+    ],
+}
+
 cc_binary {
     name: "vold",
     defaults: [
         "vold_default_flags",
         "vold_default_libs",
+        "vendor_vold_defaults",
     ],
 
     srcs: ["main.cpp"],

@@ -61,6 +61,7 @@
 #include "NetlinkManager.h"
 #include "Process.h"
 #include "Utils.h"
+#include "vendor_vold.h"
 #include "VoldNativeService.h"
 #include "VoldUtil.h"
 #include "VolumeManager.h"
@@ -209,6 +210,7 @@ void VolumeManager::handleBlockEvent(NetlinkEvent* evt) {
 
     std::string eventPath(evt->findParam("DEVPATH") ? evt->findParam("DEVPATH") : "");
     std::string devType(evt->findParam("DEVTYPE") ? evt->findParam("DEVTYPE") : "");
+    std::string devName(evt->findParam("DEVNAME") ? evt->findParam("DEVNAME") : "");
 
     if (devType != "disk") return;
 
@@ -228,6 +230,11 @@ void VolumeManager::handleBlockEvent(NetlinkEvent* evt) {
                         flags |= android::vold::Disk::Flags::kSd;
                     } else {
                         flags |= android::vold::Disk::Flags::kUsb;
+                    }
+
+                    // dont add this device as voldmanaged
+                    if (!vendor_vold_add_device(devName)) {
+                        break;
                     }
 
                     auto disk =
