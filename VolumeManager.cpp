@@ -203,6 +203,8 @@ void VolumeManager::handleBlockEvent(NetlinkEvent* evt) {
 
     std::string eventPath(evt->findParam("DEVPATH") ? evt->findParam("DEVPATH") : "");
     std::string devType(evt->findParam("DEVTYPE") ? evt->findParam("DEVTYPE") : "");
+    std::string devName(evt->findParam("DEVNAME") ? evt->findParam("DEVNAME") : "");
+    std::string rootDev;
 
     if (devType != "disk") return;
 
@@ -228,7 +230,15 @@ void VolumeManager::handleBlockEvent(NetlinkEvent* evt) {
                     } else {
                         flags |= android::vold::Disk::Flags::kUsb;
                     }
-
+    
+                    // raspi - if we boot from sda - we must ignopre as voldmanaged
+                    rootDev = android::base::GetProperty("dev.mnt.blk.root", "");
+                    if (!rootDev.empty()) {
+                        if (rootDev.find(devName) != std::string::npos) {
+                            LOG(DEBUG) << "VolumeManager: skip dev = " << devName << " it is the boot device";
+                            break;
+                        }
+                    }
                     android::vold::Disk* disk = (source->getPartNum() == -1) ?
                             new android::vold::Disk(eventPath, device,
                                     source->getNickname(), flags) :
