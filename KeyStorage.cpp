@@ -119,9 +119,13 @@ static void hashWithPrefix(char const* prefix, const std::string& tohash, std::s
     SHA512_Final(reinterpret_cast<uint8_t*>(&(*res)[0]), &c);
 }
 
-// Generates a keystore key, using rollback resistance if supported.
-static bool generateKeystoreKey(Keystore& keystore, const km::AuthorizationSetBuilder& paramBuilder,
-                                std::string* key) {
+static bool generateKeyStorageKey(Keystore& keystore, const std::string& appId, std::string* key) {
+    auto paramBuilder = km::AuthorizationSetBuilder()
+                                .AesEncryptionKey(AES_KEY_BYTES * 8)
+                                .GcmModeMinMacLen(GCM_MAC_BYTES * 8)
+                                .Authorization(km::TAG_APPLICATION_ID, appId)
+                                .Authorization(km::TAG_NO_AUTH_REQUIRED);
+    LOG(DEBUG) << "Generating \"key storage\" key";
     auto paramsWithRollback = paramBuilder;
     paramsWithRollback.Authorization(km::TAG_ROLLBACK_RESISTANCE);
 
@@ -132,16 +136,6 @@ static bool generateKeystoreKey(Keystore& keystore, const km::AuthorizationSetBu
         if (!keystore.generateKey(paramBuilder, key)) return false;
     }
     return true;
-}
-
-static bool generateKeyStorageKey(Keystore& keystore, const std::string& appId, std::string* key) {
-    auto paramBuilder = km::AuthorizationSetBuilder()
-                                .AesEncryptionKey(AES_KEY_BYTES * 8)
-                                .GcmModeMinMacLen(GCM_MAC_BYTES * 8)
-                                .Authorization(km::TAG_APPLICATION_ID, appId)
-                                .Authorization(km::TAG_NO_AUTH_REQUIRED);
-    LOG(DEBUG) << "Generating \"key storage\" key";
-    return generateKeystoreKey(keystore, paramBuilder, key);
 }
 
 bool generateWrappedStorageKey(KeyBuffer* key) {
@@ -156,7 +150,7 @@ bool generateWrappedStorageKey(KeyBuffer* key) {
     param1.value = km::KeyParameterValue::make<km::KeyParameterValue::boolValue>(true);
     paramBuilder.push_back(param1);
 
-    if (!generateKeystoreKey(keystore, paramBuilder, &key_temp)) return false;
+    if (!keystore.generateKey(paramBuilder, &key_temp)) return false;
     *key = KeyBuffer(key_temp.size());
     memcpy(reinterpret_cast<void*>(key->data()), key_temp.c_str(), key->size());
     return true;
