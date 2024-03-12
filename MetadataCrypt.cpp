@@ -103,10 +103,8 @@ static bool mount_via_fs_mgr(const char* mount_point, const char* blk_device, bo
         PLOG(ERROR) << "Failed to setexeccon";
         return false;
     }
-    auto mount_rc = fs_mgr_do_mount(&fstab_default, const_cast<char*>(mount_point),
-                                    const_cast<char*>(blk_device), nullptr,
-                                    needs_encrypt? false: android::vold::cp_needsCheckpoint(),
-                                    true);
+    auto mount_rc = fs_mgr_do_mount(&fstab_default, mount_point, blk_device,
+                                    android::vold::cp_needsCheckpoint(), needs_encrypt);
     if (setexeccon(nullptr)) {
         PLOG(ERROR) << "Failed to clear setexeccon";
         return false;
@@ -202,6 +200,13 @@ static bool create_crypto_blk_dev(const std::string& dm_name, const std::string&
     } else if (!dm.CreateDevice(dm_name, table, crypto_blkdev, 5s)) {
         LOG(ERROR) << "Could not create default-key device " << dm_name;
         return false;
+    }
+
+    // If there are multiple partitions used for a single mount, F2FS stores
+    // their partition paths in superblock. If the paths are dm targets, we
+    // cannot guarantee them across device boots. Let's use the logical paths.
+    if (dm_name == kDmNameUserdata || dm_name == kDmNameUserdataZoned) {
+        *crypto_blkdev = "/dev/block/mapper/" + dm_name;
     }
     return true;
 }
