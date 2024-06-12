@@ -26,6 +26,7 @@ void Trim(const android::sp<android::os::IVoldTaskListener>& listener);
 int RunIdleMaint(bool needGC, const android::sp<android::os::IVoldTaskListener>& listener);
 int AbortIdleMaint(const android::sp<android::os::IVoldTaskListener>& listener);
 int32_t GetStorageLifeTime();
+int32_t GetStorageRemainingLifetime();
 void SetGCUrgentPace(int32_t neededSegments, int32_t minSegmentThreshold, float dirtyReclaimRate,
                      float reclaimWeight, int32_t gcPeriod, int32_t minGCSleepTime,
                      int32_t targetDirtyRatio);

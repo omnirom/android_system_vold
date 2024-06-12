@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <linux/fs.h>
@@ -118,6 +119,16 @@ status_t Check(const std::string& source) {
     return 0;
 }
 
+int16_t currentUtcOffsetMinutes() {
+    time_t now = time(NULL);
+
+    struct tm nowTm;
+    localtime_r(&now, &nowTm);
+
+    int32_t utcOffsetSeconds = nowTm.tm_gmtoff;
+    return (int16_t)(utcOffsetSeconds / 60);
+}
+
 status_t Mount(const std::string& source, const std::string& target, bool ro, bool remount,
                bool executable, int ownerUid, int ownerGid, int permMask, bool createLost) {
     int rc;
@@ -135,6 +146,33 @@ status_t Mount(const std::string& source, const std::string& target, bool ro, bo
     auto mountData =
         android::base::StringPrintf("utf8,uid=%d,gid=%d,fmask=%o,dmask=%o,shortname=mixed",
                                     ownerUid, ownerGid, permMask, permMask);
+
+    // b/315058275: Set this to false if you don't want to use a fixed offset
+    // determined at mount time. When this is false, the vfat driver will fall
+    // back to using sys_tz, which Android does not set by default, then assume
+    // local time == UTC.
+    if (true) {
+        // Calculate the offset to use to adjust FAT timestamps to convert them
+        // from "local time" into unix epoch time. This assumes the current UTC
+        // offset of this device is the same as the device that wrote them. User
+        // space code, e.g. ls -l, will then apply the UTC offset for the UTC
+        // time to convert times from unix epoch time to local time for display.
+        // Before Android U (b/246256335), Android platform code informed the
+        // Linux kernel about the UTC offset under some circumstances, but not
+        // for all, e.g. DST changes. The kernel vfat driver is one of the few
+        // things in the kernel that tries to use kernel UTC offset information.
+        // Setting time zone offset in the Linux kernel is discouraged and so
+        // Android no longer informs the kernel. Instead, the offset for vfat
+        // to use is now set at volume mount time. This means that if the time
+        // zone offset changes while the device is mounted, or if files were
+        // written in opposing daylight saving time, then incorrect file times
+        // will be displayed until the volume is remounted. Even then, the vfat
+        // driver has to assume a fixed offset to apply to all files, so files
+        // written at different times of the year can have incorrect times
+        // calculated, e.g. offset incorrectly by one hour.
+        int16_t timeOffsetArg = currentUtcOffsetMinutes();
+        mountData += android::base::StringPrintf(",time_offset=%d", timeOffsetArg);
+    }
 
     rc = mount(c_source, c_target, "vfat", flags, mountData.c_str());
 

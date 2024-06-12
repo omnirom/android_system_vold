@@ -89,6 +89,7 @@ class VoldNativeService : public BinderService<VoldNativeService>, public os::Bn
                                 const android::sp<android::os::IVoldTaskListener>& listener);
     binder::Status abortIdleMaint(const android::sp<android::os::IVoldTaskListener>& listener);
     binder::Status getStorageLifeTime(int32_t* _aidl_return);
+    binder::Status getStorageRemainingLifetime(int32_t* _aidl_return);
     binder::Status setGCUrgentPace(int32_t neededSegments, int32_t minSegmentThreshold,
                                    float dirtyReclaimRate, float reclaimWeight, int32_t gcPeriod,
                                    int32_t minGCSleepTime, int32_t targetDirtyRatio);
@@ -112,17 +113,17 @@ class VoldNativeService : public BinderService<VoldNativeService>, public os::Bn
 
     binder::Status setStorageBindingSeed(const std::vector<uint8_t>& seed);
 
-    binder::Status createUserStorageKeys(int32_t userId, int32_t userSerial, bool ephemeral);
+    binder::Status createUserStorageKeys(int32_t userId, bool ephemeral);
     binder::Status destroyUserStorageKeys(int32_t userId);
 
     binder::Status setCeStorageProtection(int32_t userId, const std::string& secret);
 
     binder::Status getUnlockedUsers(std::vector<int>* _aidl_return);
-    binder::Status unlockCeStorage(int32_t userId, int32_t userSerial, const std::string& secret);
+    binder::Status unlockCeStorage(int32_t userId, const std::string& secret);
     binder::Status lockCeStorage(int32_t userId);
 
     binder::Status prepareUserStorage(const std::optional<std::string>& uuid, int32_t userId,
-                                      int32_t userSerial, int32_t flags);
+                                      int32_t flags);
     binder::Status destroyUserStorage(const std::optional<std::string>& uuid, int32_t userId,
                                       int32_t flags);
 

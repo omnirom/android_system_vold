@@ -507,6 +507,30 @@ int32_t GetStorageLifeTime() {
     return -1;
 }
 
+int32_t GetStorageRemainingLifetime() {
+    std::string path = getDevSysfsPath();
+    if (path.empty()) {
+        return -1;
+    }
+
+    std::string lifeTimeBasePath = path + "/health_descriptor/life_time_estimation_";
+
+    int32_t lifeTime = getLifeTime(lifeTimeBasePath + "c");
+    if (lifeTime == -1) {
+        int32_t lifeTimeA = getLifeTime(lifeTimeBasePath + "a");
+        int32_t lifeTimeB = getLifeTime(lifeTimeBasePath + "b");
+        lifeTime = std::max(lifeTimeA, lifeTimeB);
+        if (lifeTime <= 0) {
+            return -1;
+        }
+
+        // 1 = 0-10% used, 10 = 90-100% used. Subtract 1 so that a brand new
+        // device looks 0% used.
+        lifeTime = (lifeTime - 1) * 10;
+    }
+    return 100 - std::clamp(lifeTime, 0, 100);
+}
+
 void SetGCUrgentPace(int32_t neededSegments, int32_t minSegmentThreshold, float dirtyReclaimRate,
                      float reclaimWeight, int32_t gcPeriod, int32_t minGCSleepTime,
                      int32_t targetDirtyRatio) {

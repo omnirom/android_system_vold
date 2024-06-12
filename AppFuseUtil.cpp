@@ -50,14 +50,15 @@ static android::status_t GetMountPath(uid_t uid, const std::string& name, std::s
 
 static android::status_t Mount(int device_fd, const std::string& path) {
     const auto opts = StringPrintf(
-        "fd=%i,"
-        "rootmode=40000,"
-        "default_permissions,"
-        "allow_other,"
-        "user_id=0,group_id=0,"
-        "context=\"u:object_r:app_fuse_file:s0\","
-        "fscontext=u:object_r:app_fusefs:s0",
-        device_fd);
+            "fd=%i,"
+            "rootmode=40000,"
+            "default_permissions,"
+            "allow_other,"
+            "max_read=65536,"
+            "user_id=0,group_id=0,"
+            "context=\"u:object_r:app_fuse_file:s0\","
+            "fscontext=u:object_r:app_fusefs:s0",
+            device_fd);
 
     const int result =
         TEMP_FAILURE_RETRY(mount("/dev/fuse", path.c_str(), "fuse",

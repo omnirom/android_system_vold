@@ -1116,10 +1116,6 @@ std::string BuildDataSystemDePath(userid_t userId) {
     return StringPrintf("%s/system_de/%u", BuildDataPath("").c_str(), userId);
 }
 
-std::string BuildDataMiscLegacyPath(userid_t userId) {
-    return StringPrintf("%s/misc/user/%u", BuildDataPath("").c_str(), userId);
-}
-
 // Keep in sync with installd (frameworks/native/cmds/installd/utils.h)
 std::string BuildDataProfilesDePath(userid_t userId) {
     return StringPrintf("%s/misc/profiles/cur/%u", BuildDataPath("").c_str(), userId);

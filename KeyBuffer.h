@@ -28,7 +28,7 @@ namespace vold {
 // Allocator that delegates useful work to standard one but zeroes data before deallocating.
 class ZeroingAllocator : public std::allocator<char> {
   public:
-    void deallocate(pointer p, size_type n) {
+    void deallocate(value_type* p, size_type n) {
         memset_explicit(p, 0, n);
         std::allocator<char>::deallocate(p, n);
     }

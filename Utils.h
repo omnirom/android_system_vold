@@ -148,7 +148,6 @@ std::string BuildKeyPath(const std::string& partGuid);
 std::string BuildDataSystemLegacyPath(userid_t userid);
 std::string BuildDataSystemCePath(userid_t userid);
 std::string BuildDataSystemDePath(userid_t userid);
-std::string BuildDataMiscLegacyPath(userid_t userid);
 std::string BuildDataProfilesDePath(userid_t userid);
 std::string BuildDataVendorCePath(userid_t userid);
 std::string BuildDataVendorDePath(userid_t userid);
