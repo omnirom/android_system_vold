@@ -239,6 +239,7 @@ bool installKey(const std::string& mountpoint, const EncryptionOptions& options,
             }
             if (!isFsKeyringSupported()) {
                 return installKeyLegacy(key, policy->key_raw_ref);
+            }
             if (!buildKeySpecifier(&arg->key_spec, *policy)) {
                 return false;
             }
