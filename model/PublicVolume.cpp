@@ -269,6 +269,12 @@ status_t PublicVolume::doMount() {
             // No need to bind if the user does not share storage with the mount owner
             continue;
         }
+        // Create mount directory for the user as there is a chance that no other Volume is mounted
+        // for the user (ex: if the user is just started), so /mnt/user/user_id  does not exist yet.
+        auto mountDirStatus = PrepareMountDirForUser(started_user);
+        if (mountDirStatus != OK) {
+            LOG(ERROR) << "Failed to create Mount Directory for user " << started_user;
+        }
         auto bindMountStatus = bindMountForUser(started_user);
         if (bindMountStatus != OK) {
             LOG(ERROR) << "Bind Mounting Public Volume: " << stableName

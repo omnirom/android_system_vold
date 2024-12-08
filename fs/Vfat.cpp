@@ -129,8 +129,8 @@ int16_t currentUtcOffsetMinutes() {
     return (int16_t)(utcOffsetSeconds / 60);
 }
 
-status_t Mount(const std::string& source, const std::string& target, bool ro, bool remount,
-               bool executable, int ownerUid, int ownerGid, int permMask, bool createLost) {
+status_t DoMount(const std::string& source, const std::string& target, bool ro, bool remount,
+                 bool executable, int ownerUid, int ownerGid, int permMask, bool createLost) {
     int rc;
     unsigned long flags;
 
@@ -196,6 +196,32 @@ status_t Mount(const std::string& source, const std::string& target, bool ro, bo
     }
 
     return rc;
+}
+
+struct mount_args {
+    const std::string& source;
+    const std::string& target;
+    bool ro;
+    bool remount;
+    bool executable;
+    int ownerUid;
+    int ownerGid;
+    int permMask;
+    bool createLost;
+};
+
+int DoMountWrapper(void* args) {
+    struct mount_args* m_args = (struct mount_args*)args;
+
+    return DoMount(m_args->source, m_args->target, m_args->ro, m_args->remount, m_args->executable,
+                   m_args->ownerUid, m_args->ownerGid, m_args->permMask, m_args->createLost);
+}
+
+status_t Mount(const std::string& source, const std::string& target, bool ro, bool remount,
+               bool executable, int ownerUid, int ownerGid, int permMask, bool createLost) {
+    struct mount_args args = {source,   target,   ro,       remount,   executable,
+                              ownerUid, ownerGid, permMask, createLost};
+    return ForkTimeout(DoMountWrapper, &args, kUntrustedMountSleepTime);
 }
 
 status_t Format(const std::string& source, unsigned long numSectors) {

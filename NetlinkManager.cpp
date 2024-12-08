@@ -46,7 +46,7 @@ NetlinkManager::~NetlinkManager() {}
 
 int NetlinkManager::start() {
     struct sockaddr_nl nladdr;
-    int sz = 64 * 1024;
+    int sz = 256 * 1024;
     int on = 1;
 
     memset(&nladdr, 0, sizeof(nladdr));

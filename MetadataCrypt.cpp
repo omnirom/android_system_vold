@@ -17,6 +17,7 @@
 #include "MetadataCrypt.h"
 #include "KeyBuffer.h"
 
+#include <fstream>
 #include <string>
 
 #include <fcntl.h>
@@ -245,13 +246,57 @@ static bool parse_options(const std::string& options_string, CryptoOptions* opti
     return true;
 }
 
+class EncryptionInProgress {
+  private:
+    std::string file_path_;
+    bool need_cleanup_ = false;
+
+  public:
+    EncryptionInProgress(const FstabEntry& entry) {
+        file_path_ = fs_mgr_metadata_encryption_in_progress_file_name(entry);
+    }
+
+    [[nodiscard]] bool Mark() {
+        {
+            std::ofstream touch(file_path_);
+            if (!touch.is_open()) {
+                PLOG(ERROR) << "Failed to mark metadata encryption in progress " << file_path_;
+                return false;
+            }
+            need_cleanup_ = true;
+        }
+        if (!android::vold::FsyncParentDirectory(file_path_)) return false;
+
+        LOG(INFO) << "Marked metadata encryption in progress (" << file_path_ << ")";
+        return true;
+    }
+
+    [[nodiscard]] bool Remove() {
+        need_cleanup_ = false;
+        if (unlink(file_path_.c_str()) != 0) {
+            PLOG(ERROR) << "Failed to clear metadata encryption in progress (" << file_path_ << ")";
+            return false;
+        }
+        if (!android::vold::FsyncParentDirectory(file_path_)) return false;
+
+        LOG(INFO) << "Cleared metadata encryption in progress (" << file_path_ << ")";
+        return true;
+    }
+
+    ~EncryptionInProgress() {
+        if (need_cleanup_) (void)Remove();
+    }
+};
+
 bool fscrypt_mount_metadata_encrypted(const std::string& blk_device, const std::string& mount_point,
                                       bool needs_encrypt, bool should_format,
                                       const std::string& fs_type, bool is_zoned,
-                                      const std::vector<std::string>& user_devices) {
+                                      const std::vector<std::string>& user_devices,
+                                      int64_t length) {
     LOG(DEBUG) << "fscrypt_mount_metadata_encrypted: " << mount_point
                << " encrypt: " << needs_encrypt << " format: " << should_format << " with "
-               << fs_type << " block device: " << blk_device << " with zoned " << is_zoned;
+               << fs_type << " block device: " << blk_device << " with zoned " << is_zoned
+               << " length: " << length;
 
     for (auto& device : user_devices) {
         LOG(DEBUG) << " - user devices: " << device;
@@ -335,13 +380,15 @@ bool fscrypt_mount_metadata_encrypted(const std::string& blk_device, const std::
     }
 
     if (needs_encrypt) {
+        EncryptionInProgress marker(*data_rec);
+        if (!marker.Mark()) return false;
         if (should_format) {
             status_t error;
 
             if (fs_type == "ext4") {
                 error = ext4::Format(crypto_blkdev, 0, mount_point);
             } else if (fs_type == "f2fs") {
-                error = f2fs::Format(crypto_blkdev, is_zoned, crypto_user_blkdev);
+                error = f2fs::Format(crypto_blkdev, is_zoned, crypto_user_blkdev, length);
             } else {
                 LOG(ERROR) << "Unknown filesystem type: " << fs_type;
                 return false;
@@ -363,6 +410,7 @@ bool fscrypt_mount_metadata_encrypted(const std::string& blk_device, const std::
                 return false;
             }
         }
+        if (!marker.Remove()) return false;
     }
 
     LOG(DEBUG) << "Mounting metadata-encrypted filesystem:" << mount_point;

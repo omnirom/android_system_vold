@@ -109,13 +109,15 @@ static void encryptFstab(std::vector<std::string>& args,
     if (isZoned == android::base::ParseBoolResult::kError) exit(EINVAL);
 
     std::vector<std::string> userDevices = {};
-    if (args[7] != "") {
-        userDevices = android::base::Split(args[7], " ");
+    int64_t length;
+    if (!android::base::ParseInt(args[7], &length)) exit(EINVAL);
+    if (args[8] != "") {
+        userDevices = android::base::Split(args[8], " ");
     }
-    checkStatus(args,
-                vold->encryptFstab(args[2], args[3],
-                                   shouldFormat == android::base::ParseBoolResult::kTrue, args[5],
-                                   isZoned == android::base::ParseBoolResult::kTrue, userDevices));
+    checkStatus(args, vold->encryptFstab(args[2], args[3],
+                                         shouldFormat == android::base::ParseBoolResult::kTrue,
+                                         args[5], isZoned == android::base::ParseBoolResult::kTrue,
+                                         userDevices, length));
 }
 
 int main(int argc, char** argv) {
@@ -162,7 +164,7 @@ int main(int argc, char** argv) {
         bindkeys(args, vold);
     } else if (args[0] == "cryptfs" && args[1] == "mountFstab" && args.size() == 6) {
         mountFstab(args, vold);
-    } else if (args[0] == "cryptfs" && args[1] == "encryptFstab" && args.size() == 8) {
+    } else if (args[0] == "cryptfs" && args[1] == "encryptFstab" && args.size() == 9) {
         encryptFstab(args, vold);
     } else if (args[0] == "checkpoint" && args[1] == "supportsCheckpoint" && args.size() == 2) {
         bool supported = false;

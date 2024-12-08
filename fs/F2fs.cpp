@@ -72,8 +72,10 @@ status_t Mount(const std::string& source, const std::string& target) {
 }
 
 status_t Format(const std::string& source, bool is_zoned,
-                const std::vector<std::string>& user_devices) {
+                const std::vector<std::string>& user_devices, int64_t length) {
     std::vector<char const*> cmd;
+    /* '-g android' parameter passed here which defaults the sector size to 4096 */
+    static constexpr int kSectorSize = 4096;
     cmd.emplace_back(kMkfsPath);
 
     cmd.emplace_back("-f");
@@ -110,6 +112,9 @@ status_t Format(const std::string& source, bool is_zoned,
 
     cmd.emplace_back(source.c_str());
 
+    if (length) {
+        cmd.emplace_back(std::to_string(length / kSectorSize).c_str());
+    }
     return logwrap_fork_execvp(cmd.size(), cmd.data(), nullptr, false, LOG_KLOG,
                              false, nullptr);
 }

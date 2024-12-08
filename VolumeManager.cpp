@@ -102,8 +102,6 @@ static const char* kPathVirtualDisk = "/data/misc/vold/virtual_disk";
 
 static const char* kPropVirtualDisk = "persist.sys.virtual_disk";
 
-static const std::string kEmptyString("");
-
 /* 512MiB is large enough for testing purposes */
 static const unsigned int kSizeVirtualDisk = 536870912;
 
@@ -485,6 +483,13 @@ int VolumeManager::onUserStarted(userid_t userId) {
             if (mountUserId != VolumeManager::Instance()->getSharedStorageUser(userId)) {
                 // No need to bind if the user does not share storage with the mount owner
                 continue;
+            }
+            // Create mount directory for the user as there is a chance that no other Volume is
+            // mounted for the user (ex: if the user is just started), so /mnt/user/user_id  does
+            // not exist yet.
+            auto mountDirStatus = android::vold::PrepareMountDirForUser(userId);
+            if (mountDirStatus != OK) {
+                LOG(ERROR) << "Failed to create Mount Directory for user " << userId;
             }
             auto bindMountStatus = pvol->bindMountForUser(userId);
             if (bindMountStatus != OK) {
@@ -1044,7 +1049,8 @@ int VolumeManager::unmountAll() {
              !StartsWith(test, "/mnt/scratch") &&
 #endif
              !StartsWith(test, "/mnt/vendor") && !StartsWith(test, "/mnt/product") &&
-             !StartsWith(test, "/mnt/installer") && !StartsWith(test, "/mnt/androidwritable")) ||
+             !StartsWith(test, "/mnt/installer") && !StartsWith(test, "/mnt/androidwritable") &&
+             !StartsWith(test, "/mnt/vm")) ||
             StartsWith(test, "/storage/")) {
             toUnmount.push_front(test);
         }

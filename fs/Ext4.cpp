@@ -68,7 +68,7 @@ status_t Check(const std::string& source, const std::string& target) {
     const char* c_target = target.c_str();
     int ret;
     long tmpmnt_flags = MS_NOATIME | MS_NOEXEC | MS_NOSUID;
-    char* tmpmnt_opts = (char*)"nomblk_io_submit,errors=remount-ro";
+    char* tmpmnt_opts = (char*)"errors=remount-ro";
 
     /*
      * First try to mount and unmount the filesystem.  We do this because

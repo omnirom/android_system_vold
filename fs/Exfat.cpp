@@ -58,8 +58,8 @@ status_t Check(const std::string& source) {
     }
 }
 
-status_t Mount(const std::string& source, const std::string& target, int ownerUid, int ownerGid,
-               int permMask) {
+status_t DoMount(const std::string& source, const std::string& target, int ownerUid, int ownerGid,
+                 int permMask) {
     int mountFlags = MS_NODEV | MS_NOSUID | MS_DIRSYNC | MS_NOATIME | MS_NOEXEC;
     auto mountData = android::base::StringPrintf("uid=%d,gid=%d,fmask=%o,dmask=%o", ownerUid,
                                                  ownerGid, permMask, permMask);
@@ -75,6 +75,27 @@ status_t Mount(const std::string& source, const std::string& target, int ownerUi
     }
 
     return -1;
+}
+
+struct mount_args {
+    const std::string& source;
+    const std::string& target;
+    int ownerUid;
+    int ownerGid;
+    int permMask;
+};
+
+int DoMountWrapper(void* args) {
+    struct mount_args* m_args = (struct mount_args*)args;
+
+    return DoMount(m_args->source, m_args->target, m_args->ownerUid, m_args->ownerGid,
+                   m_args->permMask);
+}
+
+status_t Mount(const std::string& source, const std::string& target, int ownerUid, int ownerGid,
+               int permMask) {
+    struct mount_args args = {source, target, ownerUid, ownerGid, permMask};
+    return ForkTimeout(DoMountWrapper, &args, kUntrustedMountSleepTime);
 }
 
 status_t Format(const std::string& source) {

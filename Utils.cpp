@@ -754,6 +754,57 @@ status_t ForkExecvp(const std::vector<std::string>& args, std::vector<std::strin
     return OK;
 }
 
+status_t ForkTimeout(int (*func)(void*), void* args, std::chrono::seconds timeout) {
+    int status;
+
+    // We're waiting on either the timeout or workload process to finish, so we're
+    // initially forking to get away from any other vold children
+    pid_t wait_timeout_pid = fork();
+    if (wait_timeout_pid == 0) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            _exit(func(args));
+        }
+        if (pid == -1) {
+            _exit(EXIT_FAILURE);
+        }
+        pid_t timer_pid = fork();
+        if (timer_pid == 0) {
+            std::this_thread::sleep_for(timeout);
+            _exit(ETIMEDOUT);
+        }
+        if (timer_pid == -1) {
+            PLOG(ERROR) << "fork in ForkTimeout failed";
+            kill(pid, SIGTERM);
+            _exit(EXIT_FAILURE);
+        }
+        // Preserve the exit code of the first process to finish, and end the other
+        pid_t finished = wait(&status);
+        if (finished == pid) {
+            kill(timer_pid, SIGTERM);
+        } else {
+            kill(pid, SIGTERM);
+        }
+        if (!WIFEXITED(status)) {
+            _exit(ECHILD);
+        }
+        _exit(WEXITSTATUS(status));
+    }
+    if (waitpid(wait_timeout_pid, &status, 0) == -1) {
+        PLOG(ERROR) << "waitpid in ForkTimeout failed";
+        return -errno;
+    }
+    if (!WIFEXITED(status)) {
+        LOG(ERROR) << "Process did not exit normally, status: " << status;
+        return -ECHILD;
+    }
+    if (WEXITSTATUS(status)) {
+        LOG(ERROR) << "Process exited with code: " << WEXITSTATUS(status);
+        return WEXITSTATUS(status);
+    }
+    return OK;
+}
+
 status_t ForkExecvpTimeout(const std::vector<std::string>& args, std::chrono::seconds timeout,
                            char* context) {
     int status;
@@ -1562,15 +1613,9 @@ status_t MountUserFuse(userid_t user_id, const std::string& absolute_lower_path,
         return -1;
     }
 
-    // Shell is neither AID_ROOT nor AID_EVERYBODY. Since it equally needs 'execute' access to
-    // /mnt/user/0 to 'adb shell ls /sdcard' for instance, we set the uid bit of /mnt/user/0 to
-    // AID_SHELL. This gives shell access along with apps running as group everybody (user 0 apps)
-    // These bits should be consistent with what is set in zygote in
-    // com_android_internal_os_Zygote#MountEmulatedStorage on volume bind mount during app fork
-    result = PrepareDir(pre_fuse_path, 0710, user_id ? AID_ROOT : AID_SHELL,
-                             multiuser_get_uid(user_id, AID_EVERYBODY));
+    result = PrepareMountDirForUser(user_id);
     if (result != android::OK) {
-        PLOG(ERROR) << "Failed to prepare directory " << pre_fuse_path;
+        PLOG(ERROR) << "Failed to create Mount Directory for user " << user_id;
         return -1;
     }
 
@@ -1806,6 +1851,23 @@ bool IsFuseBpfEnabled() {
     LOG(INFO) << "Setting ro.fuse.bpf.is_running to " << value;
     base::SetProperty("ro.fuse.bpf.is_running", value);
     return enabled;
+}
+
+status_t PrepareMountDirForUser(userid_t user_id) {
+    std::string pre_fuse_path(StringPrintf("/mnt/user/%d", user_id));
+    LOG(INFO) << "Creating mount directory " << pre_fuse_path;
+    // Shell is neither AID_ROOT nor AID_EVERYBODY. Since it equally needs 'execute' access to
+    // /mnt/user/0 to 'adb shell ls /sdcard' for instance, we set the uid bit of /mnt/user/0 to
+    // AID_SHELL. This gives shell access along with apps running as group everybody (user 0 apps)
+    // These bits should be consistent with what is set in zygote in
+    // com_android_internal_os_Zygote#MountEmulatedStorage on volume bind mount during app fork
+    auto result = PrepareDir(pre_fuse_path, 0710, user_id ? AID_ROOT : AID_SHELL,
+                             multiuser_get_uid(user_id, AID_EVERYBODY));
+    if (result != android::OK) {
+        PLOG(ERROR) << "Failed to prepare directory " << pre_fuse_path;
+        return -1;
+    }
+    return result;
 }
 
 }  // namespace vold

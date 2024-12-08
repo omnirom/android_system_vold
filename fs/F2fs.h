@@ -31,7 +31,7 @@ bool IsSupported();
 status_t Check(const std::string& source);
 status_t Mount(const std::string& source, const std::string& target);
 status_t Format(const std::string& source, const bool is_zoned,
-                const std::vector<std::string>& user_devices);
+                const std::vector<std::string>& user_devices, int64_t length = 0);
 
 }  // namespace f2fs
 }  // namespace vold

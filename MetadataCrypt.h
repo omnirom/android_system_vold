@@ -29,7 +29,7 @@ void defaultkey_precreate_dm_device();
 bool fscrypt_mount_metadata_encrypted(const std::string& block_device,
                                       const std::string& mount_point, bool needs_encrypt,
                                       bool should_format, const std::string& fs_type, bool is_zoned,
-                                      const std::vector<std::string>& user_devices);
+                                      const std::vector<std::string>& user_devices, int64_t length);
 
 bool defaultkey_volume_keygen(KeyGeneration* gen);
 
