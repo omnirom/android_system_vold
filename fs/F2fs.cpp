@@ -27,6 +27,7 @@
 #include <vector>
 
 #include <sys/mount.h>
+#include <filesystem>
 
 using android::base::StringPrintf;
 
@@ -72,8 +73,9 @@ status_t Mount(const std::string& source, const std::string& target) {
 }
 
 status_t Format(const std::string& source, bool is_zoned,
-                const std::vector<std::string>& user_devices, int64_t length) {
-    std::vector<char const*> cmd;
+                const std::vector<std::string>& user_devices,
+                const std::vector<bool>& device_aliased, int64_t length) {
+    std::vector<std::string> cmd;
     /* '-g android' parameter passed here which defaults the sector size to 4096 */
     static constexpr int kSectorSize = 4096;
     cmd.emplace_back(kMkfsPath);
@@ -102,21 +104,31 @@ status_t Format(const std::string& source, bool is_zoned,
     if (is_zoned) {
         cmd.emplace_back("-m");
     }
-    for (auto& device : user_devices) {
+    for (size_t i = 0; i < user_devices.size(); i++) {
+        std::string device_name = user_devices[i];
+
         cmd.emplace_back("-c");
-        cmd.emplace_back(device.c_str());
+        if (device_aliased[i]) {
+            std::filesystem::path path = device_name;
+            device_name += "@" + path.filename().string();
+        }
+        cmd.emplace_back(device_name);
     }
-    std::string block_size = std::to_string(getpagesize());
     cmd.emplace_back("-b");
-    cmd.emplace_back(block_size.c_str());
+    cmd.emplace_back(std::to_string(getpagesize()));
 
     cmd.emplace_back(source.c_str());
 
     if (length) {
-        cmd.emplace_back(std::to_string(length / kSectorSize).c_str());
+        cmd.emplace_back(std::to_string(length / kSectorSize));
     }
-    return logwrap_fork_execvp(cmd.size(), cmd.data(), nullptr, false, LOG_KLOG,
-                             false, nullptr);
+
+    std::vector<char const*> cmd_cstrs;
+    for (auto& arg : cmd) {
+        cmd_cstrs.emplace_back(arg.c_str());
+    }
+    return logwrap_fork_execvp(cmd_cstrs.size(), cmd_cstrs.data(), nullptr, false, LOG_KLOG, false,
+                               nullptr);
 }
 
 }  // namespace f2fs

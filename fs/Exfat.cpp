@@ -102,7 +102,7 @@ status_t Format(const std::string& source) {
     std::vector<std::string> cmd;
     cmd.push_back(kMkfsPath);
     cmd.push_back("-n");
-    cmd.push_back("android");
+    cmd.push_back("External");
     cmd.push_back(source);
 
     int rc = ForkExecvp(cmd);

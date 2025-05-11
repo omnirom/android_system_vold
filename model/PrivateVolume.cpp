@@ -45,6 +45,7 @@ namespace android {
 namespace vold {
 
 static const unsigned int kMajorBlockLoop = 7;
+static const unsigned int kMajorBlockHdd = 8;
 static const unsigned int kMajorBlockMmc = 179;
 
 PrivateVolume::PrivateVolume(dev_t device, const KeyBuffer& keyRaw)
@@ -218,6 +219,7 @@ status_t PrivateVolume::doFormat(const std::string& fsType) {
         // give everyone else ext4 because sysfs rotational isn't reliable.
         // Additionally, prefer f2fs for loop-based devices
         if ((major(mRawDevice) == kMajorBlockMmc ||
+             major(mRawDevice) == kMajorBlockHdd ||
              major(mRawDevice) == kMajorBlockLoop ||
              IsVirtioBlkDevice(major(mRawDevice))) && f2fs::IsSupported()) {
             resolvedFsType = "f2fs";
@@ -234,7 +236,7 @@ status_t PrivateVolume::doFormat(const std::string& fsType) {
             return -EIO;
         }
     } else if (resolvedFsType == "f2fs") {
-        if (f2fs::Format(mDmDevPath, false, {})) {
+        if (f2fs::Format(mDmDevPath, false, {}, {})) {
             PLOG(ERROR) << getId() << " failed to format";
             return -EIO;
         }

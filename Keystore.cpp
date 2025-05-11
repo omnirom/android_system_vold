@@ -130,8 +130,8 @@ Keystore::Keystore() {
 bool Keystore::generateKey(const km::AuthorizationSet& inParams, std::string* key) {
     ks2::KeyDescriptor in_key = {
             .domain = ks2::Domain::BLOB,
-            .alias = std::nullopt,
             .nspace = VOLD_NAMESPACE,
+            .alias = std::nullopt,
             .blob = std::nullopt,
     };
     ks2::KeyMetadata keyMetadata;
@@ -154,8 +154,8 @@ km::ErrorCode Keystore::exportKey(const KeyBuffer& ksKey, std::string* key) {
     km::ErrorCode ret = km::ErrorCode::UNKNOWN_ERROR;
     ks2::KeyDescriptor storageKey = {
             .domain = ks2::Domain::BLOB,
-            .alias = std::nullopt,
             .nspace = VOLD_NAMESPACE,
+            .alias = std::nullopt,
     };
     storageKey.blob = std::make_optional<std::vector<uint8_t>>(ksKey.begin(), ksKey.end());
     ks2::EphemeralStorageKeyResponse ephemeral_key_response;
@@ -184,8 +184,8 @@ out:
 bool Keystore::deleteKey(const std::string& key) {
     ks2::KeyDescriptor keyDesc = {
             .domain = ks2::Domain::BLOB,
-            .alias = std::nullopt,
             .nspace = VOLD_NAMESPACE,
+            .alias = std::nullopt,
     };
     keyDesc.blob =
             std::optional<std::vector<uint8_t>>(std::vector<uint8_t>(key.begin(), key.end()));
@@ -198,8 +198,8 @@ KeystoreOperation Keystore::begin(const std::string& key, const km::Authorizatio
                                   km::AuthorizationSet* outParams) {
     ks2::KeyDescriptor keyDesc = {
             .domain = ks2::Domain::BLOB,
-            .alias = std::nullopt,
             .nspace = VOLD_NAMESPACE,
+            .alias = std::nullopt,
     };
     keyDesc.blob =
             std::optional<std::vector<uint8_t>>(std::vector<uint8_t>(key.begin(), key.end()));
@@ -224,7 +224,7 @@ KeystoreOperation Keystore::begin(const std::string& key, const km::Authorizatio
 }
 
 void Keystore::earlyBootEnded() {
-    ::ndk::SpAIBinder binder(AServiceManager_getService(maintenance_service_name));
+    ::ndk::SpAIBinder binder(AServiceManager_waitForService(maintenance_service_name));
     auto maint_service = ks2_maint::IKeystoreMaintenance::fromBinder(binder);
 
     if (!maint_service) {
@@ -237,7 +237,7 @@ void Keystore::earlyBootEnded() {
 }
 
 void Keystore::deleteAllKeys() {
-    ::ndk::SpAIBinder binder(AServiceManager_getService(maintenance_service_name));
+    ::ndk::SpAIBinder binder(AServiceManager_waitForService(maintenance_service_name));
     auto maint_service = ks2_maint::IKeystoreMaintenance::fromBinder(binder);
 
     if (!maint_service) {

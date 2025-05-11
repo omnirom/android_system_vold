@@ -1260,19 +1260,11 @@ int VolumeManager::openAppFuseFile(uid_t uid, int mountId, int fileId, int flags
     return android::vold::OpenAppFuseFile(uid, mountId, fileId, flags);
 }
 
-android::status_t android::vold::GetStorageSize(int64_t* storageSize) {
-    // Start with the /data mount point from fs_mgr
-    auto entry = android::fs_mgr::GetEntryForMountPoint(&fstab_default, DATA_MNT_POINT);
-    if (entry == nullptr) {
-        LOG(ERROR) << "No mount point entry for " << DATA_MNT_POINT;
-        return EINVAL;
-    }
-
+static android::status_t getDeviceSize(std::string& device, int64_t* storageSize) {
     // Follow any symbolic links
-    std::string blkDevice = entry->blk_device;
     std::string dataDevice;
-    if (!android::base::Realpath(blkDevice, &dataDevice)) {
-        dataDevice = blkDevice;
+    if (!android::base::Realpath(device, &dataDevice)) {
+        dataDevice = device;
     }
 
     // Handle mapped volumes.
@@ -1322,5 +1314,31 @@ android::status_t android::vold::GetStorageSize(int64_t* storageSize) {
     }
 
     *storageSize *= 512;
+    return OK;
+}
+
+android::status_t android::vold::GetStorageSize(int64_t* storageSize) {
+    android::status_t status;
+    // Start with the /data mount point from fs_mgr
+    auto entry = android::fs_mgr::GetEntryForMountPoint(&fstab_default, DATA_MNT_POINT);
+    if (entry == nullptr) {
+        LOG(ERROR) << "No mount point entry for " << DATA_MNT_POINT;
+        return EINVAL;
+    }
+
+    status = getDeviceSize(entry->blk_device, storageSize);
+    if (status != OK) {
+        return status;
+    }
+
+    for (auto device : entry->user_devices) {
+        int64_t deviceStorageSize;
+        status = getDeviceSize(device, &deviceStorageSize);
+        if (status != OK) {
+            return status;
+        }
+        *storageSize += deviceStorageSize;
+    }
+
     return OK;
 }
