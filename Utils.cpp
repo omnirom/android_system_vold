@@ -1724,6 +1724,139 @@ status_t UnmountUserFuse(userid_t user_id, const std::string& absolute_lower_pat
     return result;
 }
 
+/* returns list of non unmounted paths */
+std::vector<std::string> UnmountFusePaths(const std::vector<std::string>& paths_to_unmount) {
+    std::vector<std::string> non_unmounted_paths;
+    for (const auto& path : paths_to_unmount) {
+        LOG(INFO) << "Unmounting fuse path " << path;
+        const char* cpath = path.c_str();
+        if (!umount2(cpath, UMOUNT_NOFOLLOW) || errno == EINVAL || errno == ENOENT) {
+            rmdir(cpath);
+            continue;
+        }
+        non_unmounted_paths.push_back(path);
+    }
+    return non_unmounted_paths;
+}
+
+/* returns list of non unmounted paths */
+std::vector<std::string> UnmountFusePathsWithSleepAndPolling(
+        const std::vector<std::string>& paths_to_unmount) {
+    std::vector<std::string> non_unmounted_paths = paths_to_unmount;
+
+    int count = 10;
+    while (count-- > 0) {
+        usleep(500 * 1000);
+        non_unmounted_paths = UnmountFusePaths(non_unmounted_paths);
+        if (non_unmounted_paths.empty()) {
+            return non_unmounted_paths;
+        }
+    }
+    return non_unmounted_paths;
+}
+
+/* returns list of non unmounted paths */
+std::vector<std::string> KillProcessesWithFuseOpenFilesAndUnmount(
+        const std::vector<std::string>& paths_to_unmount, const std::string& absolute_upper_path,
+        int signal, bool kill_fuse_daemon, bool force_sleep_if_no_processes_killed) {
+
+    // In addition to killing apps using paths to unmount, we need to kill aps using
+    // the upper path (e.g storage/emulated) As they would prevent unmounting fuse
+    std::vector<std::string> paths_to_kill(paths_to_unmount);
+    paths_to_kill.push_back(absolute_upper_path);
+
+    int total_killed_pids = KillProcessesWithOpenFiles(paths_to_kill, signal, kill_fuse_daemon);
+
+    if (sSleepOnUnmount && (force_sleep_if_no_processes_killed || total_killed_pids)) {
+        return UnmountFusePathsWithSleepAndPolling(paths_to_unmount);
+    }
+    return UnmountFusePaths(paths_to_unmount);
+}
+
+status_t UnmountUserFuseEnhanced(userid_t user_id, const std::string& absolute_lower_path,
+                                 const std::string& relative_upper_path,
+                                 const std::string& absolute_upper_path,
+                                 const std::vector<std::string>& bind_mount_paths) {
+    std::vector<std::string> paths_to_unmount(bind_mount_paths);
+
+    std::string fuse_path(StringPrintf("/mnt/user/%d/%s", user_id, relative_upper_path.c_str()));
+    paths_to_unmount.push_back(fuse_path);
+
+    std::string pass_through_path(
+            StringPrintf("/mnt/pass_through/%d/%s", user_id, relative_upper_path.c_str()));
+    paths_to_unmount.push_back(pass_through_path);
+
+    auto start_time = std::chrono::steady_clock::now();
+    LOG(INFO) << "Unmounting fuse paths";
+
+    // Try unmounting without killing any processes
+    paths_to_unmount = UnmountFusePaths(paths_to_unmount);
+    if (paths_to_unmount.empty()) {
+        return android::OK;
+    }
+
+    // Kill processes except for FuseDaemon holding references to fuse paths with SIGINT
+    // And try to unmount afterwards with sleep and polling mechanism
+    paths_to_unmount = KillProcessesWithFuseOpenFilesAndUnmount(
+            paths_to_unmount, absolute_upper_path, SIGINT, /*kill_fuse_daemon*/ false,
+            /*force_sleep_if_no_processes_killed*/false);
+    if (paths_to_unmount.empty()) {
+        return android::OK;
+    }
+
+    // Kill processes except for FuseDaemon holding references to fuse paths with SIGTERM
+    // And try to unmount afterwards with sleep and polling mechanism
+    paths_to_unmount = KillProcessesWithFuseOpenFilesAndUnmount(
+            paths_to_unmount, absolute_upper_path, SIGTERM, /*kill_fuse_daemon*/ false,
+            /*force_sleep_if_no_processes_killed*/false);
+
+    if (paths_to_unmount.empty()) {
+        return android::OK;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    auto time_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time);
+    bool force_sleep_if_no_process_killed = time_elapsed < std::chrono::milliseconds(5000);
+    // Kill processes except for FuseDaemon holding references to fuse paths with SIGKILL
+    // And try to unmount afterwards with sleep and polling mechanism
+    // intentionally force sleep if sSleepOnUnmount isn't set to false
+    // and if we haven't slept in previous retries so that we give MediaProvider time
+    // to release FDs prior to try killing it in the next step
+    paths_to_unmount = KillProcessesWithFuseOpenFilesAndUnmount(
+            paths_to_unmount, absolute_upper_path, SIGKILL, /*kill_fuse_daemon*/ false,
+            force_sleep_if_no_process_killed);
+
+    if (paths_to_unmount.empty()) {
+        return android::OK;
+    }
+
+    // Kill processes including FuseDaemon holding references to fuse paths with SIGKILL
+    // And try to unmount afterwards with sleep and polling mechanism
+    paths_to_unmount = KillProcessesWithFuseOpenFilesAndUnmount(
+            paths_to_unmount, absolute_upper_path, SIGKILL, /*kill_fuse_daemon*/ true,
+            /*force_sleep_if_no_processes_killed*/false);
+    if (paths_to_unmount.empty()) {
+        return android::OK;
+    }
+
+    // If we reached here, then it means that previous kill and unmount retries didn't succeed
+    // Try to unmount with MNT_DETACH so we try lazily unmount
+    android::status_t result = android::OK;
+    for (const auto& path : paths_to_unmount) {
+        LOG(ERROR) << "Failed to unmount. Trying MNT_DETACH " << path;
+        const char* cpath = path.c_str();
+        if (!umount2(cpath, UMOUNT_NOFOLLOW | MNT_DETACH) || errno == EINVAL || errno == ENOENT) {
+            rmdir(cpath);
+            continue;
+        }
+        PLOG(ERROR) << "Failed to unmount with MNT_DETACH " << path;
+        if (path == fuse_path) {
+            result = -errno;
+        }
+    }
+    return result;
+}
+
 status_t PrepareAndroidDirs(const std::string& volumeRoot) {
     std::string androidDir = volumeRoot + kAndroidDir;
     std::string androidDataDir = volumeRoot + kAppDataDir;

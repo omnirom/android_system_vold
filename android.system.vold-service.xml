@@ -1,0 +1,10 @@
+<manifest version="1.0" type="framework">
+    <hal format="aidl">
+        <name>android.system.vold</name>
+        <version>1</version>
+        <interface>
+            <name>IVold</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+</manifest>

@@ -1,0 +1,10 @@
+package: "android.vold.flags"
+container: "system"
+
+flag {
+  name: "enhance_fuse_unmount"
+  namespace: "mediaprovider"
+  description: "This flag controls whether enhancements to unmounting is enabled"
+  bug: "402367661"
+  is_fixed_read_only: true
+}

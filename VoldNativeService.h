@@ -165,6 +165,12 @@ class VoldNativeService : public BinderService<VoldNativeService>, public os::Bn
     binder::Status destroyDsuMetadataKey(const std::string& dsuSlot) override;
 
     binder::Status getStorageSize(int64_t* storageSize) override;
+
+    binder::Status getWriteBoosterBufferSize(int32_t* _aidl_return);
+    binder::Status getWriteBoosterBufferAvailablePercent(int32_t* _aidl_return);
+    binder::Status setWriteBoosterBufferFlush(bool enable, bool* _aidl_return);
+    binder::Status setWriteBoosterBufferOn(bool enable, bool* _aidl_return);
+    binder::Status getWriteBoosterLifeTimeEstimate(int32_t* _aidl_return);
 };
 
 }  // namespace vold

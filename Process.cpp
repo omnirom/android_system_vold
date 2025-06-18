@@ -46,7 +46,7 @@ using android::base::StringPrintf;
 namespace android {
 namespace vold {
 
-static bool checkMaps(const std::string& path, const std::string& prefix) {
+static bool checkMaps(const std::string& path, const std::vector<std::string>& prefixes) {
     bool found = false;
     auto file = std::unique_ptr<FILE, decltype(&fclose)>{fopen(path.c_str(), "re"), fclose};
     if (!file) {
@@ -60,9 +60,14 @@ static bool checkMaps(const std::string& path, const std::string& prefix) {
         std::string::size_type pos = line.find('/');
         if (pos != std::string::npos) {
             line = line.substr(pos);
-            if (android::base::StartsWith(line, prefix)) {
-                LOG(WARNING) << "Found map " << path << " referencing " << line;
-                found = true;
+            for (const auto& prefix : prefixes) {
+                if (android::base::StartsWith(line, prefix)) {
+                    LOG(WARNING) << "Found map " << path << " referencing " << line;
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
                 break;
             }
         }
@@ -72,12 +77,14 @@ static bool checkMaps(const std::string& path, const std::string& prefix) {
     return found;
 }
 
-static bool checkSymlink(const std::string& path, const std::string& prefix) {
+static bool checkSymlink(const std::string& path, const std::vector<std::string>& prefixes) {
     std::string res;
     if (android::base::Readlink(path, &res)) {
-        if (android::base::StartsWith(res, prefix)) {
-            LOG(WARNING) << "Found symlink " << path << " referencing " << res;
-            return true;
+        for (const auto& prefix : prefixes) {
+            if (android::base::StartsWith(res, prefix)) {
+                LOG(WARNING) << "Found symlink " << path << " referencing " << res;
+                return true;
+            }
         }
     }
     return false;
@@ -129,7 +136,8 @@ int KillProcessesWithTmpfsMounts(const std::string& prefix, int signal) {
     return pids.size();
 }
 
-int KillProcessesWithOpenFiles(const std::string& prefix, int signal, bool killFuseDaemon) {
+int KillProcessesWithOpenFiles(const std::vector<std::string>& prefixes, int signal,
+                               bool killFuseDaemon) {
     std::unordered_set<pid_t> pids;
 
     auto proc_d = std::unique_ptr<DIR, int (*)(DIR*)>(opendir("/proc"), closedir);
@@ -148,10 +156,10 @@ int KillProcessesWithOpenFiles(const std::string& prefix, int signal, bool killF
         // Look for references to prefix
         bool found = false;
         auto path = StringPrintf("/proc/%d", pid);
-        found |= checkMaps(path + "/maps", prefix);
-        found |= checkSymlink(path + "/cwd", prefix);
-        found |= checkSymlink(path + "/root", prefix);
-        found |= checkSymlink(path + "/exe", prefix);
+        found |= checkMaps(path + "/maps", prefixes);
+        found |= checkSymlink(path + "/cwd", prefixes);
+        found |= checkSymlink(path + "/root", prefixes);
+        found |= checkSymlink(path + "/exe", prefixes);
 
         auto fd_path = path + "/fd";
         auto fd_d = std::unique_ptr<DIR, int (*)(DIR*)>(opendir(fd_path.c_str()), closedir);
@@ -161,7 +169,7 @@ int KillProcessesWithOpenFiles(const std::string& prefix, int signal, bool killF
             struct dirent* fd_de;
             while ((fd_de = readdir(fd_d.get())) != nullptr) {
                 if (fd_de->d_type != DT_LNK) continue;
-                found |= checkSymlink(fd_path + "/" + fd_de->d_name, prefix);
+                found |= checkSymlink(fd_path + "/" + fd_de->d_name, prefixes);
             }
         }
 
@@ -196,6 +204,11 @@ int KillProcessesWithOpenFiles(const std::string& prefix, int signal, bool killF
         }
     }
     return totalKilledPids;
+}
+
+int KillProcessesWithOpenFiles(const std::string& prefix, int signal, bool killFuseDaemon) {
+    return KillProcessesWithOpenFiles(std::vector<std::string>(1, prefix), signal,
+                                      killFuseDaemon);
 }
 
 }  // namespace vold

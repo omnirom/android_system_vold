@@ -17,9 +17,6 @@
     },
     {
       "name": "CtsScopedStorageRedactUriTest"
-    },
-    {
-      "name": "AdoptableHostTest"
     }
   ],
   "hwasan-postsubmit": [
@@ -40,9 +37,6 @@
     },
     {
       "name": "CtsScopedStorageRedactUriTest"
-    },
-    {
-      "name": "AdoptableHostTest"
     }
   ]
 }

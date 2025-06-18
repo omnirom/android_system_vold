@@ -136,13 +136,16 @@ Status cp_startCheckpoint(int retry) {
         return error(ENOTSUP, "Checkpoints not supported");
 
     if (retry < -1) return error(EINVAL, "Retry count must be more than -1");
-    std::string content = std::to_string(retry + 1);
+    std::string content;
     if (retry == -1) {
+        content = std::to_string(-1);
         auto module = BootControlClient::WaitForService();
         if (module) {
             std::string suffix = module->GetSuffix(module->GetCurrentSlot());
             if (!suffix.empty()) content += " " + suffix;
         }
+    } else {
+        content = std::to_string(retry + 1);
     }
     if (!android::base::WriteStringToFile(content, kMetadataCPFile))
         return error("Failed to write checkpoint file");
@@ -159,6 +162,21 @@ volatile bool needsCheckpointWasCalled = false;
 // Protects isCheckpointing, needsCheckpointWasCalled and code that makes decisions based on status
 // of isCheckpointing
 std::mutex isCheckpointingLock;
+
+std::mutex listenersLock;
+std::vector<android::sp<android::system::vold::IVoldCheckpointListener>> listeners;
+}  // namespace
+
+void notifyCheckpointListeners() {
+    std::lock_guard<std::mutex> lock(listenersLock);
+
+    for (auto& listener : listeners) {
+        listener->onCheckpointingComplete();
+        listener = nullptr;
+    }
+
+    // Reclaim vector memory; we likely won't need it again.
+    listeners = std::vector<android::sp<android::system::vold::IVoldCheckpointListener>>();
 }
 
 Status cp_commitChanges() {
@@ -220,6 +238,8 @@ Status cp_commitChanges() {
     isCheckpointing = false;
     if (!android::base::RemoveFileIfExists(kMetadataCPFile, &err_str))
         return error(err_str.c_str());
+
+    notifyCheckpointListeners();
 
     std::thread(DoCheckpointCommittedWork).detach();
     return Status::ok();
@@ -290,18 +310,21 @@ bool cp_needsCheckpoint() {
     std::string content;
     auto module = BootControlClient::WaitForService();
 
-    if (isCheckpointing) return isCheckpointing;
+    if (isCheckpointing) return true;
+
     // In case of INVALID slot or other failures, we do not perform checkpoint.
     if (module && !module->IsSlotMarkedSuccessful(module->GetCurrentSlot()).value_or(true)) {
         isCheckpointing = true;
         return true;
     }
     ret = android::base::ReadFileToString(kMetadataCPFile, &content);
-    if (ret) {
-        ret = content != "0";
-        isCheckpointing = ret;
-        return ret;
+    if (ret && content != "0") {
+        isCheckpointing = true;
+        return true;
     }
+
+    // Leave isCheckpointing false and notify listeners now that we know we don't need one
+    notifyCheckpointListeners();
     return false;
 }
 
@@ -799,6 +822,21 @@ Status cp_markBootAttempt() {
 void cp_resetCheckpoint() {
     std::lock_guard<std::mutex> lock(isCheckpointingLock);
     needsCheckpointWasCalled = false;
+}
+
+bool cp_registerCheckpointListener(
+        android::sp<android::system::vold::IVoldCheckpointListener> listener) {
+    std::lock_guard<std::mutex> checkpointGuard(isCheckpointingLock);
+    if (needsCheckpointWasCalled && !isCheckpointing) {
+        // Either checkpoint already committed or we didn't need one
+        return false;
+    }
+
+    // Either we don't know whether we need a checkpoint or we're already checkpointing,
+    // so we need to save this listener to notify later.
+    std::lock_guard<std::mutex> listenersGuard(listenersLock);
+    listeners.push_back(std::move(listener));
+    return true;
 }
 
 }  // namespace vold

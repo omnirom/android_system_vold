@@ -205,6 +205,10 @@ status_t MountUserFuse(userid_t user_id, const std::string& absolute_lower_path,
 
 status_t UnmountUserFuse(userid_t userId, const std::string& absolute_lower_path,
                          const std::string& relative_upper_path);
+status_t UnmountUserFuseEnhanced(userid_t userId, const std::string& absolute_lower_path,
+                                 const std::string& relative_upper_path,
+                                 const std::string& absolute_upper_path,
+                                 const std::vector<std::string>& bind_mount_paths = {});
 
 status_t PrepareAndroidDirs(const std::string& volumeRoot);
 

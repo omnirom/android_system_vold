@@ -36,9 +36,11 @@
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <android_vold_flags.h>
 
 using android::base::GetBoolProperty;
 using android::base::StringPrintf;
+namespace flags = android::vold::flags;
 
 namespace android {
 namespace vold {
@@ -88,6 +90,15 @@ status_t PublicVolume::initAsecStage() {
     return OK;
 }
 
+std::string PublicVolume::getStableName() {
+    // Use UUID as stable name, if available
+    std::string stableName = getId();
+    if (!mFsUuid.empty()) {
+        stableName = mFsUuid;
+    }
+    return stableName;
+}
+
 status_t PublicVolume::doCreate() {
     return CreateDeviceNode(mDevPath, mDevice);
 }
@@ -115,11 +126,7 @@ status_t PublicVolume::doMount() {
         return -EIO;
     }
 
-    // Use UUID as stable name, if available
-    std::string stableName = getId();
-    if (!mFsUuid.empty()) {
-        stableName = mFsUuid;
-    }
+    std::string stableName = getStableName();
 
     mRawPath = StringPrintf("/mnt/media_rw/%s", stableName.c_str());
 
@@ -286,10 +293,7 @@ status_t PublicVolume::doMount() {
 
 status_t PublicVolume::bindMountForUser(userid_t user_id) {
     userid_t mountUserId = getMountUserId();
-    std::string stableName = getId();
-    if (!mFsUuid.empty()) {
-        stableName = mFsUuid;
-    }
+    std::string stableName = getStableName();
 
     LOG(INFO) << "Bind Mounting Public Volume for user: " << user_id
               << ".Mount owner: " << mountUserId;
@@ -307,33 +311,56 @@ status_t PublicVolume::doUnmount() {
     // the FUSE process first, most file system operations will return
     // ENOTCONN until the unmount completes. This is an exotic and unusual
     // error code and might cause broken behaviour in applications.
-    KillProcessesUsingPath(getPath());
+
+    // We don't kill processes here if enhance_fuse_unmount as we make sure that we kill processes
+    // only if unmounting failed
+    if (!mFuseMounted || !flags::enhance_fuse_unmount()) {
+        KillProcessesUsingPath(getPath());
+    }
 
     if (mFuseMounted) {
-        // Use UUID as stable name, if available
-        std::string stableName = getId();
-        if (!mFsUuid.empty()) {
-            stableName = mFsUuid;
-        }
+        std::string stableName = getStableName();
 
         // Unmount bind mounts for running users
         auto vol_manager = VolumeManager::Instance();
-        int user_id = getMountUserId();
-        for (int started_user : vol_manager->getStartedUsers()) {
+        userid_t user_id = getMountUserId();
+        std::vector<std::string> bind_mount_paths;
+        for (userid_t started_user : vol_manager->getStartedUsers()) {
             if (started_user == user_id) {
                 // No need to remove bind mount for the user that owns the mount
                 continue;
             }
-            LOG(INFO) << "Removing Public Volume Bind Mount for: " << started_user;
+            if (user_id != VolumeManager::Instance()->getSharedStorageUser(started_user)) {
+                // No need to remove bind mount
+                // if the user does not share storage with the mount owner
+                continue;
+            }
+
             auto mountPath = GetFuseMountPathForUser(started_user, stableName);
-            ForceUnmount(mountPath);
-            rmdir(mountPath.c_str());
+            if (flags::enhance_fuse_unmount()) {
+                // Add it to list so that we unmount it as part of UnmountUserFuseEnhanced
+                bind_mount_paths.push_back(mountPath);
+            } else {
+                LOG(INFO) << "Removing Public Volume Bind Mount for: " << started_user;
+                ForceUnmount(mountPath);
+                rmdir(mountPath.c_str());
+            }
         }
 
-        if (UnmountUserFuse(getMountUserId(), getInternalPath(), stableName) != OK) {
-            PLOG(INFO) << "UnmountUserFuse failed on public fuse volume";
-            return -errno;
+        if (flags::enhance_fuse_unmount()) {
+            status_t result = UnmountUserFuseEnhanced(getMountUserId(), getInternalPath(),
+                                                      stableName, getPath(), bind_mount_paths);
+            if (result != OK) {
+                PLOG(INFO) << "UnmountUserFuseEnhanced failed on public fuse volume";
+                return result;
+            }
+        } else {
+            if (UnmountUserFuse(getMountUserId(), getInternalPath(), stableName) != OK) {
+                PLOG(INFO) << "UnmountUserFuse failed on public fuse volume";
+                return -errno;
+            }
         }
+
 
         mFuseMounted = false;
     }

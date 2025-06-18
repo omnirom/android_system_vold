@@ -43,6 +43,7 @@ cc_defaults {
         "libfs_mgr",
         "libsquashfs_utils",
         "libvold_binder",
+        "android.system.vold-V1-cpp",
     ],
     shared_libs: [
         "android.hardware.boot@1.0",
@@ -103,6 +104,11 @@ cc_library_headers {
     export_include_dirs: ["."],
 }
 
+vintf_fragment {
+    name: "android.system.vold-service.xml",
+    src: "android.system.vold-service.xml",
+}
+
 // Static library factored out to support testing
 cc_library_static {
     name: "libvold",
@@ -132,10 +138,12 @@ cc_library_static {
         "NetlinkManager.cpp",
         "Process.cpp",
         "Utils.cpp",
+        "VendorVoldNativeService.cpp",
         "VoldNativeService.cpp",
         "VoldNativeServiceValidation.cpp",
         "VoldUtil.cpp",
         "VolumeManager.cpp",
+        "WriteBooster.cpp",
         "cryptfs.cpp",
         "fs/Exfat.cpp",
         "fs/Ext4.cpp",
@@ -149,6 +157,12 @@ cc_library_static {
         "model/StubVolume.cpp",
         "model/VolumeBase.cpp",
         "model/VolumeEncryption.cpp",
+    ],
+    shared_libs: [
+        "server_configurable_flags",
+    ],
+    static_libs: [
+        "vold_flags_c_lib",
     ],
     product_variables: {
         arc: {
@@ -198,6 +212,7 @@ cc_binary {
             ],
         },
     },
+    vintf_fragment_modules: ["android.system.vold-service.xml"],
 }
 
 cc_binary {
@@ -261,4 +276,16 @@ filegroup {
         "binder/android/os/IVoldTaskListener.aidl",
     ],
     path: "binder",
+}
+
+aconfig_declarations {
+    name: "vold_flags",
+    package: "android.vold.flags",
+    srcs: ["aconfig/flags.aconfig"],
+    container: "system",
+}
+
+cc_aconfig_library {
+    name: "vold_flags_c_lib",
+    aconfig_declarations: "vold_flags",
 }

@@ -20,6 +20,8 @@
 namespace android {
 namespace vold {
 
+int KillProcessesWithOpenFiles(const std::vector<std::string>& paths, int signal,
+                               bool killFuseDaemon = true);
 int KillProcessesWithOpenFiles(const std::string& path, int signal, bool killFuseDaemon = true);
 int KillProcessesWithTmpfsMounts(const std::string& path, int signal);
 

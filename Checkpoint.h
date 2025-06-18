@@ -17,6 +17,7 @@
 #ifndef _CHECKPOINT_H
 #define _CHECKPOINT_H
 
+#include <android/system/vold/IVold.h>
 #include <binder/Status.h>
 #include <string>
 
@@ -48,6 +49,9 @@ android::binder::Status cp_restoreCheckpoint(const std::string& mountPoint, int 
 android::binder::Status cp_markBootAttempt();
 
 void cp_resetCheckpoint();
+
+bool cp_registerCheckpointListener(
+        android::sp<android::system::vold::IVoldCheckpointListener> listener);
 }  // namespace vold
 }  // namespace android
 

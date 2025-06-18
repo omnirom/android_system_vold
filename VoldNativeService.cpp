@@ -40,6 +40,7 @@
 #include "VoldNativeServiceValidation.h"
 #include "VoldUtil.h"
 #include "VolumeManager.h"
+#include "WriteBooster.h"
 #include "cryptfs.h"
 #include "incfs.h"
 
@@ -509,6 +510,45 @@ binder::Status VoldNativeService::getStorageRemainingLifetime(int32_t* _aidl_ret
     ACQUIRE_LOCK;
 
     *_aidl_return = GetStorageRemainingLifetime();
+    return Ok();
+}
+
+binder::Status VoldNativeService::getWriteBoosterBufferSize(int32_t* _aidl_return) {
+    ENFORCE_SYSTEM_OR_ROOT;
+
+    *_aidl_return = GetWriteBoosterBufferSize();
+    return Ok();
+}
+
+binder::Status VoldNativeService::getWriteBoosterBufferAvailablePercent(int32_t* _aidl_return) {
+    ENFORCE_SYSTEM_OR_ROOT;
+    ACQUIRE_LOCK;
+
+    *_aidl_return = GetWriteBoosterBufferAvailablePercent();
+    return Ok();
+}
+
+binder::Status VoldNativeService::setWriteBoosterBufferFlush(bool enable, bool* _aidl_return) {
+    ENFORCE_SYSTEM_OR_ROOT;
+    ACQUIRE_LOCK;
+
+    *_aidl_return = SetWriteBoosterBufferFlush(enable);
+    return Ok();
+}
+
+binder::Status VoldNativeService::setWriteBoosterBufferOn(bool enable, bool* _aidl_return) {
+    ENFORCE_SYSTEM_OR_ROOT;
+    ACQUIRE_LOCK;
+
+    *_aidl_return = SetWriteBoosterBufferOn(enable);
+    return Ok();
+}
+
+binder::Status VoldNativeService::getWriteBoosterLifeTimeEstimate(int32_t* _aidl_return) {
+    ENFORCE_SYSTEM_OR_ROOT;
+    ACQUIRE_LOCK;
+
+    *_aidl_return = GetWriteBoosterLifeTimeEstimate();
     return Ok();
 }
 

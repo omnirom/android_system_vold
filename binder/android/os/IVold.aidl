@@ -143,6 +143,12 @@ interface IVold {
     // on failure.
     int getStorageRemainingLifetime();
 
+    int getWriteBoosterBufferSize();
+    int getWriteBoosterBufferAvailablePercent();
+    boolean setWriteBoosterBufferFlush(boolean enable);
+    boolean setWriteBoosterBufferOn(boolean enable);
+    int getWriteBoosterLifeTimeEstimate();
+
     const int FSTRIM_FLAG_DEEP_TRIM = 1;
 
     const int MOUNT_FLAG_PRIMARY = 1;

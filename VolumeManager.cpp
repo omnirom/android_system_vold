@@ -465,36 +465,41 @@ int VolumeManager::onUserStarted(userid_t userId) {
 
     if (mStartedUsers.find(userId) == mStartedUsers.end()) {
         createEmulatedVolumesForUser(userId);
-        std::list<std::string> public_vols;
-        listVolumes(VolumeBase::Type::kPublic, public_vols);
-        for (const std::string& id : public_vols) {
-            PublicVolume* pvol = static_cast<PublicVolume*>(findVolume(id).get());
-            if (pvol->getState() != VolumeBase::State::kMounted) {
-                continue;
-            }
-            if (pvol->isVisible() == 0) {
-                continue;
-            }
-            userid_t mountUserId = pvol->getMountUserId();
-            if (userId == mountUserId) {
-                // No need to bind mount for the user that owns the mount
-                continue;
-            }
-            if (mountUserId != VolumeManager::Instance()->getSharedStorageUser(userId)) {
-                // No need to bind if the user does not share storage with the mount owner
-                continue;
-            }
-            // Create mount directory for the user as there is a chance that no other Volume is
-            // mounted for the user (ex: if the user is just started), so /mnt/user/user_id  does
-            // not exist yet.
-            auto mountDirStatus = android::vold::PrepareMountDirForUser(userId);
-            if (mountDirStatus != OK) {
-                LOG(ERROR) << "Failed to create Mount Directory for user " << userId;
-            }
-            auto bindMountStatus = pvol->bindMountForUser(userId);
-            if (bindMountStatus != OK) {
-                LOG(ERROR) << "Bind Mounting Public Volume: " << pvol << " for user: " << userId
-                           << "Failed. Error: " << bindMountStatus;
+
+        userid_t sharedStorageUserId = VolumeManager::Instance()->getSharedStorageUser(userId);
+        if (sharedStorageUserId != USER_UNKNOWN) {
+            std::list<std::string> public_vols;
+            listVolumes(VolumeBase::Type::kPublic, public_vols);
+            for (const std::string& id : public_vols) {
+                PublicVolume *pvol = static_cast<PublicVolume *>(findVolume(id).get());
+                if (pvol->getState() != VolumeBase::State::kMounted) {
+                    continue;
+                }
+                if (pvol->isVisible() == 0) {
+                    continue;
+                }
+                userid_t mountUserId = pvol->getMountUserId();
+                if (userId == mountUserId) {
+                    // No need to bind mount for the user that owns the mount
+                    continue;
+                }
+
+                if (mountUserId != sharedStorageUserId) {
+                    // No need to bind if the user does not share storage with the mount owner
+                    continue;
+                }
+                // Create mount directory for the user as there is a chance that no other Volume is
+                // mounted for the user (ex: if the user is just started),
+                // so /mnt/user/user_id  does not exist yet.
+                auto mountDirStatus = android::vold::PrepareMountDirForUser(userId);
+                if (mountDirStatus != OK) {
+                    LOG(ERROR) << "Failed to create Mount Directory for user " << userId;
+                }
+                auto bindMountStatus = pvol->bindMountForUser(userId);
+                if (bindMountStatus != OK) {
+                    LOG(ERROR) << "Bind Mounting Public Volume: " << pvol << " for user: " << userId
+                               << "Failed. Error: " << bindMountStatus;
+                }
             }
         }
     }
@@ -510,6 +515,36 @@ int VolumeManager::onUserStopped(userid_t userId) {
 
     if (mStartedUsers.find(userId) != mStartedUsers.end()) {
         destroyEmulatedVolumesForUser(userId);
+
+        userid_t sharedStorageUserId = VolumeManager::Instance()->getSharedStorageUser(userId);
+        if (sharedStorageUserId != USER_UNKNOWN) {
+            std::list<std::string> public_vols;
+            listVolumes(VolumeBase::Type::kPublic, public_vols);
+            for (const std::string &id: public_vols) {
+                PublicVolume *pvol = static_cast<PublicVolume *>(findVolume(id).get());
+                if (pvol->getState() != VolumeBase::State::kMounted) {
+                    continue;
+                }
+                if (pvol->isVisible() == 0) {
+                    continue;
+                }
+                userid_t mountUserId = pvol->getMountUserId();
+                if (userId == mountUserId) {
+                    // No need to remove bind mount for the user that owns the mount
+                    continue;
+                }
+                if (mountUserId != sharedStorageUserId) {
+                    // No need to remove bind mount
+                    // if the user does not share storage with the mount owner
+                    continue;
+                }
+                LOG(INFO) << "Removing Public Volume Bind Mount for: " << userId;
+                auto mountPath = GetFuseMountPathForUser(userId, pvol->getStableName());
+                android::vold::ForceUnmount(mountPath);
+                rmdir(mountPath.c_str());
+            }
+        }
+
     }
 
     mStartedUsers.erase(userId);
@@ -1260,7 +1295,8 @@ int VolumeManager::openAppFuseFile(uid_t uid, int mountId, int fileId, int flags
     return android::vold::OpenAppFuseFile(uid, mountId, fileId, flags);
 }
 
-static android::status_t getDeviceSize(std::string& device, int64_t* storageSize) {
+static android::status_t getDeviceSize(std::string& device, int64_t* storageSize,
+                                       bool isF2fsPrimary) {
     // Follow any symbolic links
     std::string dataDevice;
     if (!android::base::Realpath(device, &dataDevice)) {
@@ -1269,14 +1305,35 @@ static android::status_t getDeviceSize(std::string& device, int64_t* storageSize
 
     // Handle mapped volumes.
     auto& dm = android::dm::DeviceMapper::Instance();
-    for (;;) {
-        auto parent = dm.GetParentBlockDeviceByPath(dataDevice);
-        if (!parent.has_value()) break;
-        dataDevice = *parent;
+    std::string dmPath = dataDevice;
+    if (dm.IsDmBlockDevice(dataDevice)) {
+        for (;;) {
+            auto parent = dm.GetParentBlockDeviceByPath(dataDevice);
+            if (!parent.has_value()) break;
+            dataDevice = *parent;
+        }
+    } else if (isF2fsPrimary) {
+        if (!dm.GetDmDevicePathByName(android::base::Basename(device), &dmPath)) {
+            LOG(WARNING) << "No proper dm device for " << device;
+            isF2fsPrimary = false;
+        }
+    }
+
+    // Find a device name for F2FS primary partition
+    std::string f2fsReservedBlocksSysfs;
+    std::size_t leaf;
+    if (isF2fsPrimary) {
+        leaf = dmPath.rfind('/');
+        if (leaf == std::string::npos) {
+            LOG(WARNING) << "dm device " << dmPath << " is not a path";
+            isF2fsPrimary = false;
+        }
+        f2fsReservedBlocksSysfs =
+                std::string() + "/sys/fs/f2fs/" + dmPath.substr(leaf + 1) + "/reserved_blocks";
     }
 
     // Get the potential /sys/block entry
-    std::size_t leaf = dataDevice.rfind('/');
+    leaf = dataDevice.rfind('/');
     if (leaf == std::string::npos) {
         LOG(ERROR) << "data device " << dataDevice << " is not a path";
         return EINVAL;
@@ -1306,14 +1363,32 @@ static android::status_t getDeviceSize(std::string& device, int64_t* storageSize
     }
 
     // Read the size file and be done
+    int64_t sizeNum;
     std::stringstream ssSize(size);
-    ssSize >> *storageSize;
+    ssSize >> sizeNum;
     if (ssSize.fail()) {
         LOG(ERROR) << sizeFile << " cannot be read as an integer";
         return EINVAL;
     }
 
-    *storageSize *= 512;
+    sizeNum *= 512;
+    if (isF2fsPrimary) {
+        int64_t reservedBlocksNum = 0;
+        if (!android::base::ReadFileToString(f2fsReservedBlocksSysfs, &size, true)) {
+            LOG(WARNING) << "Could not find valid entry from " << f2fsReservedBlocksSysfs;
+        } else {
+            std::stringstream reservedBlocks(size);
+            reservedBlocks >> reservedBlocksNum;
+            if (reservedBlocks.fail()) {
+                LOG(WARNING) << f2fsReservedBlocksSysfs << " cannot be read as an integer";
+                reservedBlocksNum = 0;
+            }
+        }
+        int64_t blockSize = android::base::GetIntProperty("ro.boot.hardware.cpu.pagesize", 0);
+        sizeNum -= reservedBlocksNum * blockSize;
+    }
+
+    *storageSize = sizeNum;
     return OK;
 }
 
@@ -1326,14 +1401,14 @@ android::status_t android::vold::GetStorageSize(int64_t* storageSize) {
         return EINVAL;
     }
 
-    status = getDeviceSize(entry->blk_device, storageSize);
+    status = getDeviceSize(entry->blk_device, storageSize, entry->fs_type == "f2fs");
     if (status != OK) {
         return status;
     }
 
     for (auto device : entry->user_devices) {
         int64_t deviceStorageSize;
-        status = getDeviceSize(device, &deviceStorageSize);
+        status = getDeviceSize(device, &deviceStorageSize, false);
         if (status != OK) {
             return status;
         }

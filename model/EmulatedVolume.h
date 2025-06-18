@@ -51,6 +51,7 @@ class EmulatedVolume : public VolumeBase {
     status_t unmountSdcardFs();
     status_t mountFuseBindMounts();
     status_t unmountFuseBindMounts();
+    status_t unbindSharedStorageMountPath();
 
     status_t bindMountVolume(const EmulatedVolume& vol, std::list<std::string>& pathsToUnmount);
 

@@ -17,6 +17,7 @@
 #include <android-base/logging.h>
 #include <fuzzbinder/libbinder_driver.h>
 
+#include "VendorVoldNativeService.h"
 #include "VoldNativeService.h"
 #include "sehandle.h"
 
@@ -36,7 +37,10 @@ extern "C" int LLVMFuzzerInitialize(int argc, char argv) {
 }
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+    // TODO(b/183141167): need to rewrite 'dump' to avoid SIGPIPE.
+    signal(SIGPIPE, SIG_IGN);
     auto voldService = sp<android::vold::VoldNativeService>::make();
-    fuzzService(voldService, FuzzedDataProvider(data, size));
+    auto voldVendorService = sp<android::vold::VendorVoldNativeService>::make();
+    fuzzService({voldService, voldVendorService}, FuzzedDataProvider(data, size));
     return 0;
 }

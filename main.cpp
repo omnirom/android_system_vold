@@ -19,6 +19,7 @@
 #include "FsCrypt.h"
 #include "MetadataCrypt.h"
 #include "NetlinkManager.h"
+#include "VendorVoldNativeService.h"
 #include "VoldNativeService.h"
 #include "VoldUtil.h"
 #include "VolumeManager.h"
@@ -126,8 +127,15 @@ int main(int argc, char** argv) {
         exit(1);
     }
     ATRACE_END();
-
     LOG(DEBUG) << "VoldNativeService::start() completed OK";
+
+    ATRACE_BEGIN("VendorVoldNativeService::try_start");
+    if (android::vold::VendorVoldNativeService::try_start() != android::OK) {
+        LOG(ERROR) << "Unable to start VendorVoldNativeService";
+        exit(1);
+    }
+    ATRACE_END();
+    LOG(DEBUG) << "VendorVoldNativeService::try_start() completed OK";
 
     ATRACE_BEGIN("NetlinkManager::start");
     if (nm->start()) {

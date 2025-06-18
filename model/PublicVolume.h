@@ -43,6 +43,7 @@ class PublicVolume : public VolumeBase {
     virtual ~PublicVolume();
 
     status_t bindMountForUser(userid_t user_id);
+    std::string getStableName();
 
   protected:
     status_t doCreate() override;
