@@ -200,7 +200,7 @@ static bool get_ce_key_new_path(const std::string& directory_path,
 static bool fixate_user_ce_key(const std::string& directory_path, const std::string& to_fix,
                                const std::vector<std::string>& paths) {
     bool need_sync = false;
-    for (auto const other_path : paths) {
+    for (auto const& other_path : paths) {
         if (other_path != to_fix) {
             android::vold::destroyKey(other_path);
             need_sync = true;
@@ -221,7 +221,7 @@ static bool read_and_fixate_user_ce_key(userid_t user_id,
                                         KeyBuffer* ce_key) {
     auto const directory_path = get_ce_key_directory_path(user_id);
     auto const paths = get_ce_key_paths(directory_path);
-    for (auto const ce_key_path : paths) {
+    for (auto const& ce_key_path : paths) {
         LOG(DEBUG) << "Trying user CE key " << ce_key_path;
         if (retrieveKey(ce_key_path, auth, ce_key)) {
             LOG(DEBUG) << "Successfully retrieved key";
@@ -719,7 +719,7 @@ bool fscrypt_destroy_user_keys(userid_t user_id) {
     if (!s_ephemeral_users.erase(user_id)) {
         auto ce_path = get_ce_key_directory_path(user_id);
         if (!s_new_ce_keys.erase(user_id)) {
-            for (auto const path : get_ce_key_paths(ce_path)) {
+            for (auto const& path : get_ce_key_paths(ce_path)) {
                 success &= android::vold::destroyKey(path);
             }
         }

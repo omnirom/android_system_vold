@@ -29,8 +29,6 @@ cc_defaults {
     name: "vold_default_libs",
 
     static_libs: [
-        "android.hardware.health.storage@1.0",
-        "android.hardware.health.storage-V1-ndk",
         "android.security.maintenance-ndk",
         "libasync_safe",
         "libavb",
@@ -136,6 +134,7 @@ cc_library_static {
         "MoveStorage.cpp",
         "NetlinkHandler.cpp",
         "NetlinkManager.cpp",
+        "NvmeDeviceUtils.cpp",
         "Process.cpp",
         "Utils.cpp",
         "VendorVoldNativeService.cpp",
@@ -199,7 +198,7 @@ cc_binary {
     required: [
         "mke2fs",
         "vold_prepare_subdirs",
-        "fuseMedia.o",
+        "fuseMedia.bpf",
     ],
 
     product_variables: {

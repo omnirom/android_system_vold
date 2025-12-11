@@ -1407,6 +1407,13 @@ android::status_t android::vold::GetStorageSize(int64_t* storageSize) {
     }
 
     for (auto device : entry->user_devices) {
+        /*
+         * Now other user devices reside on the same device as the main partition
+         * except zoned_device. So, we now include only zoned_device when calculating
+         * storage device size.
+         */
+        if (android::base::Basename(device) != "zoned_device") continue;
+
         int64_t deviceStorageSize;
         status = getDeviceSize(device, &deviceStorageSize, false);
         if (status != OK) {

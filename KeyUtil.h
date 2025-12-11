@@ -23,6 +23,7 @@
 #include <fscrypt/fscrypt.h>
 
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace android {

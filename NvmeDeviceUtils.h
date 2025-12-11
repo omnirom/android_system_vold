@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 The Android Open Source Project
+ * Copyright (C) 2025 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,21 +14,15 @@
  * limitations under the License.
  */
 
-#ifndef ANDROID_VOLD_FILEDEVICEUTILS_H
-#define ANDROID_VOLD_FILEDEVICEUTILS_H
+#ifndef ANDROID_VOLD_NVME_DEVICE_UTILS_H
+#define ANDROID_VOLD_NVME_DEVICE_UTILS_H
 
-#include <linux/fiemap.h>
-#include <memory>
-#include <string>
+#include <cstdint>
 
 namespace android {
 namespace vold {
 
-// Given a file path, look for the corresponding block device in /proc/mount
-std::string BlockDeviceForPath(const std::string& path);
-
-// Read the file's FIEMAP
-std::unique_ptr<struct fiemap> PathFiemap(const std::string& path, uint32_t extent_count);
+int32_t GetNvmeStorageLifeTime(const std::string& blk_device);
 
 }  // namespace vold
 }  // namespace android
